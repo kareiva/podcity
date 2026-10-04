@@ -1,0 +1,163 @@
+:root {
+  --panel: rgb(255 255 255 / 0.85);
+  --ink: #1f2937;
+  --muted: #6b7280;
+  --accent: #2563eb;
+  font-family: system-ui, sans-serif;
+  color: var(--ink);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --panel: rgb(17 24 39 / 0.85);
+    --ink: #e5e7eb;
+    --muted: #9ca3af;
+    --accent: #60a5fa;
+  }
+}
+
+html, body {
+  margin: 0;
+  height: 100%;
+  overflow: hidden;
+  background: #bfd4e6;
+}
+
+#app {
+  position: fixed;
+  inset: 0;
+}
+
+.labels {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.label {
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  background: var(--panel);
+  white-space: nowrap;
+}
+
+.label.district {
+  font-weight: 600;
+  font-size: 12px;
+}
+
+#ui {
+  position: fixed;
+  top: 12px;
+  left: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: min(420px, calc(100vw - 24px));
+}
+
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  align-items: center;
+  padding: 6px;
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.controls button {
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.controls button:hover { border-color: var(--muted); }
+.controls button.active { border-color: var(--accent); color: var(--accent); }
+
+.mode {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: #e5e7eb;
+  color: #374151;
+}
+
+.mode.live { background: #dc2626; color: white; }
+
+.feed {
+  margin: 0;
+  padding: 8px 12px;
+  list-style: none;
+  border-radius: 8px;
+  background: var(--panel);
+  font: 12px/1.5 ui-monospace, monospace;
+  white-space: pre;
+  overflow: hidden;
+}
+
+.feed li:first-child { color: var(--accent); }
+
+.tooltip {
+  position: fixed;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--panel);
+  box-shadow: 0 2px 8px rgb(0 0 0 / 0.2);
+  pointer-events: none;
+}
+
+.tooltip[hidden] { display: none; }
+.tooltip .kind { font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--muted); }
+.tooltip .name { font: 13px ui-monospace, monospace; }
+
+.controls label {
+  font-size: 13px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+}
+
+.steps {
+  padding: 8px;
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.steps ol {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.steps button {
+  font: inherit;
+  font-size: 13px;
+  padding: 4px 10px;
+  border: 1px solid var(--muted);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--ink);
+  cursor: pointer;
+}
+
+.steps button.done { border-color: var(--accent); }
+.steps button.active { background: var(--accent); border-color: var(--accent); color: white; }
+.steps p { margin: 8px 2px 0; font-size: 13px; color: var(--muted); }
+.steps .next { margin-top: 8px; }
+.steps .next[hidden] { display: none; }
