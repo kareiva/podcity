@@ -2,8 +2,20 @@ import * as THREE from 'three';
 import { tag } from './entity';
 import { makeGate } from './gate';
 import { makeLabel } from './label';
-import { addConveyor } from './conveyor';
-import { CITY_RADIUS, HIGHWAY_LANES, ISO_20FT, buildPath, seaportLayout, districts, pullPath, quadletOffice, quadletRoad, rndLab, serviceRoute, wallXWest, warehouseHall, type DistrictId, type Pad } from './layout';
+import {
+  CITY_RADIUS,
+  CRANE_HEIGHT,
+  HIGHWAY_LANES,
+  ISO_20FT,
+  UNPACK_GANTRY_HEIGHT,
+  buildCranes,
+  craneYaw,
+  pullCranes,
+  unpackSpot,
+  truckBay,
+  type CraneSpec,
+  seaportLayout,
+  districts, quadletOffice, quadletRoad, rndLab, serviceGate, serviceRoute, warehouseHall, type DistrictId, type Pad } from './layout';
 import { palette } from './palette';
 
 const DISTRICT_NAMES: Record<DistrictId, string> = {
@@ -61,10 +73,10 @@ export function buildCity(scene: THREE.Scene): City {
   addLaneMarkings(scene, districts.hostLand);
   addRoad(scene, serviceRoute);
   addRoad(scene, quadletRoad);
-  // The service road enters the city through a gate: systemd lives on the host.
-  const [, [, serviceZ]] = serviceRoute as [[number, number], [number, number]];
-  const gate = makeGate(4, true);
-  gate.position.set(wallXWest(serviceZ), 0, serviceZ);
+  // The service road enters the city through a gate in the south wall: systemd lives on the host.
+  const gatePos = serviceGate();
+  const gate = makeGate(4, false);
+  gate.position.set(gatePos.x, 0, gatePos.z);
   scene.add(gate);
 
   buildWarehouseHall(scene);
@@ -76,8 +88,10 @@ export function buildCity(scene: THREE.Scene): City {
   buildShoppingCenter(scene);
   buildSeaportSilhouette(scene);
   const ship = buildContainerShip(scene);
-  // Image delivery conveyors, both flowing into the warehouse.
-  const conveyors = [addConveyor(scene, pullPath), addConveyor(scene, buildPath)];
+  // Image delivery: tower cranes relay containers; a gantry in the warehouse opens them.
+  for (const spec of [...pullCranes, ...buildCranes]) buildTowerCrane(scene, spec);
+  buildUnpackGantry(scene);
+  buildDeployTruck(scene);
 
   return {
     update(now) {
@@ -85,9 +99,133 @@ export function buildCity(scene: THREE.Scene): City {
       ship.group.position.y = ship.restY + Math.sin(now * 0.8) * 0.25;
       ship.group.rotation.x = Math.sin(now * 0.6) * 0.025;
       ship.group.rotation.y = Math.sin(now * 0.15) * 0.04;
-      for (const c of conveyors) c.update(now);
     },
   };
+}
+
+/** Hook length (below the jib or gantry beam) when idle. */
+export const HOIST_REST = 2;
+
+/**
+ * Hoist: a cable and hook block hanging from `anchor`. The director lengthens
+ * the cable to lower the hook and attaches loads to the hook.
+ */
+function addHoist(anchor: THREE.Object3D, x: number): void {
+  const hoist = new THREE.Group();
+  hoist.name = 'hoist';
+  hoist.position.x = x;
+  const cable = new THREE.Mesh(new THREE.BoxGeometry(0.08, 1, 0.08), mat(palette.bars));
+  cable.name = 'cable';
+  cable.scale.y = HOIST_REST;
+  cable.position.y = -HOIST_REST / 2;
+  const hook = new THREE.Group();
+  hook.name = 'hook';
+  hook.position.y = -HOIST_REST;
+  const block = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.6, 0.6), mat(palette.network));
+  block.name = 'block';
+  hook.add(block);
+  hoist.add(cable, hook);
+  anchor.add(hoist);
+}
+
+/** Tower crane: mast, and a slewing jib with counterweight, trolley and hoist at the jib's working radius. */
+function buildTowerCrane(scene: THREE.Scene, spec: CraneSpec): void {
+  const crane = new THREE.Group();
+  crane.name = spec.name;
+  crane.position.set(spec.x, 0.3, spec.z);
+  const k = CRANE_HEIGHT / 12; // structural parts scale with the crane's height
+  const mast = new THREE.Mesh(new THREE.BoxGeometry(0.9 * k, CRANE_HEIGHT, 0.9 * k), mat(palette.tower));
+  mast.position.y = CRANE_HEIGHT / 2;
+  const slew = new THREE.Group();
+  slew.name = 'slew';
+  slew.position.y = CRANE_HEIGHT;
+  slew.rotation.y = craneYaw(spec, spec.from);
+  const reach = spec.radius + 1.5;
+  const jib = new THREE.Mesh(new THREE.BoxGeometry(reach, 0.6 * k, 0.6 * k), mat(palette.image));
+  jib.position.x = reach / 2;
+  const counterLen = reach * 0.3;
+  const counterJib = new THREE.Mesh(new THREE.BoxGeometry(counterLen, 0.6 * k, 0.6 * k), mat(palette.image));
+  counterJib.position.x = -counterLen / 2;
+  const weight = new THREE.Mesh(new THREE.BoxGeometry(1.4 * k, 1.2 * k, 1.2 * k), mat(palette.stopped));
+  weight.position.set(-counterLen + 0.7 * k, -0.6 * k, 0);
+  const cab = new THREE.Mesh(new THREE.BoxGeometry(1.4 * k, 1.2 * k, 1.2 * k), mat(palette.building));
+  cab.position.set(0.9 * k, -0.6 * k, 0.9 * k);
+  // Top of the tower above the slewing ring, with pendant ties out along the jib.
+  const peak = new THREE.Mesh(new THREE.BoxGeometry(0.6 * k, 3 * k, 0.6 * k), mat(palette.tower));
+  peak.position.y = 1.5 * k;
+  slew.add(peak);
+  for (const [len, sign] of [[reach * 0.7, 1], [counterLen, -1]] as const) {
+    const tie = new THREE.Mesh(new THREE.BoxGeometry(Math.hypot(len, 3 * k), 0.1, 0.1), mat(palette.bars));
+    tie.position.set((sign * len) / 2, 1.5 * k, 0);
+    tie.rotation.z = -sign * Math.atan2(3 * k, len);
+    slew.add(tie);
+  }
+  const trolley = new THREE.Mesh(new THREE.BoxGeometry(0.9 * k, 0.4 * k, 0.9 * k), mat(palette.bars));
+  trolley.position.set(spec.radius, -0.4 * k, 0);
+  slew.add(jib, counterJib, weight, cab, trolley);
+  addHoist(slew, spec.radius);
+  crane.add(mast, slew);
+  crane.traverse((o) => (o.castShadow = true));
+  tag(crane, { key: spec.name, kind: 'district', name: 'Crane · image delivery' });
+  scene.add(crane);
+}
+
+/** Deploy truck flatbed: where a carried container sits, in the truck's local frame (cab at +x). */
+export const TRUCK_BED = { x: -1.2, top: 1.1 };
+
+/** Small container truck: cab, flatbed sized for a 20ft container, six wheels. Parked at its bay facing east. */
+function buildDeployTruck(scene: THREE.Scene): void {
+  const truck = new THREE.Group();
+  truck.name = 'truck:deploy';
+  truck.position.set(truckBay.x, 0.3, truckBay.z);
+  const bedLen = ISO_20FT.l + 0.4;
+  const bed = new THREE.Mesh(new THREE.BoxGeometry(bedLen, 0.3, ISO_20FT.w + 0.2), mat(palette.bars));
+  bed.position.set(TRUCK_BED.x, TRUCK_BED.top - 0.15, 0);
+  const cab = new THREE.Mesh(new THREE.BoxGeometry(1.8, 1.9, ISO_20FT.w + 0.2), mat(palette.network));
+  cab.position.set(TRUCK_BED.x + bedLen / 2 + 1, 0.55 + 0.95, 0);
+  const windscreen = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.7, ISO_20FT.w - 0.3), mat(palette.water));
+  windscreen.position.set(TRUCK_BED.x + bedLen / 2 + 1.91, 1.9, 0);
+  truck.add(bed, cab, windscreen);
+  const wheel = new THREE.CylinderGeometry(0.5, 0.5, 0.35, 10);
+  for (const x of [TRUCK_BED.x - bedLen / 2 + 0.9, TRUCK_BED.x - bedLen / 2 + 2, TRUCK_BED.x + bedLen / 2 + 1])
+    for (const z of [-1, 1]) {
+      const w = new THREE.Mesh(wheel, mat(palette.road));
+      w.rotation.x = Math.PI / 2;
+      w.position.set(x, 0.5, z * (ISO_20FT.w / 2 + 0.05));
+      truck.add(w);
+    }
+  truck.traverse((o) => (o.castShadow = true));
+  tag(truck, { key: 'truck:deploy', kind: 'district', name: 'Deploy truck · image -> factory' });
+  scene.add(truck);
+}
+
+/** Small gantry over the unpacking spot: lifts container lids so the layer crates can come out. */
+function buildUnpackGantry(scene: THREE.Scene): void {
+  const gantry = new THREE.Group();
+  gantry.name = 'crane:unpack';
+  gantry.position.set(unpackSpot.x, 0.3, unpackSpot.z);
+  const h = UNPACK_GANTRY_HEIGHT;
+  const halfX = ISO_20FT.l / 2 + 1.2; // clears a container at any angle
+  for (const x of [-halfX, halfX])
+    for (const z of [-1.4, 1.4]) {
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.35, h, 0.35), mat(palette.image));
+      leg.position.set(x, h / 2, z);
+      gantry.add(leg);
+    }
+  for (const z of [-1.4, 1.4]) {
+    const beam = new THREE.Mesh(new THREE.BoxGeometry(halfX * 2 + 0.35, 0.4, 0.35), mat(palette.image));
+    beam.position.set(0, h, z);
+    gantry.add(beam);
+  }
+  const bridge = new THREE.Group(); // the hoist hangs from the middle of the bridge
+  bridge.position.y = h;
+  const carriage = new THREE.Mesh(new THREE.BoxGeometry(0.8, 0.4, 3.2), mat(palette.bars));
+  bridge.add(carriage);
+  addHoist(bridge, 0);
+  gantry.add(bridge);
+  gantry.traverse((o) => (o.castShadow = true));
+  tag(gantry, { key: 'crane:unpack', kind: 'district', name: 'Unpacking crane · image -> layers' });
+  scene.add(gantry);
 }
 
 /** Near-invisible terminal shed and ship-to-shore gantry cranes reaching over the water. */
@@ -395,7 +533,7 @@ function buildBusinessCenter(scene: THREE.Scene): void {
   scene.add(group);
 }
 
-/** Demo entry point by the wall: where visitors see the running app. */
+/** Demo entry point beside the Quadlet department: where visitors see the running app. Faces south, onto its road. */
 function buildShoppingCenter(scene: THREE.Scene): void {
   const p = districts.shoppingCenter;
   const group = new THREE.Group();
@@ -403,9 +541,9 @@ function buildShoppingCenter(scene: THREE.Scene): void {
   const hall = new THREE.Mesh(new THREE.BoxGeometry(12, 4, 8), mat(palette.building));
   hall.position.y = 2;
   const awning = new THREE.Mesh(new THREE.BoxGeometry(12.6, 0.4, 2), mat(palette.network));
-  awning.position.set(0, 3.2, -4.6);
+  awning.position.set(0, 3.2, 4.6);
   const sign = new THREE.Mesh(new THREE.BoxGeometry(6, 1.6, 0.3), mat(palette.pod));
-  sign.position.set(0, 5, -3);
+  sign.position.set(0, 5, 3);
   for (const m of [hall, awning, sign]) {
     m.castShadow = true;
     group.add(m);

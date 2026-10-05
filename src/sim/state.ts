@@ -21,6 +21,9 @@ export interface ContainerState {
   pod?: string;
   autoRemove?: boolean;
   command?: string;
+  restartPolicy?: 'always';
+  runFor?: number;
+  restarts: number;
 }
 
 export interface NetworkState {
@@ -107,12 +110,20 @@ export function applyEvent(state: PodmanState, e: SimEvent): void {
         pod: e.pod,
         autoRemove: e.autoRemove,
         command: e.command,
+        restartPolicy: e.restart,
+        runFor: e.runFor,
+        restarts: 0,
       });
       if (e.pod) state.pods.get(e.pod)?.members.push(e.id);
       break;
-    case 'container.start':
-      setStatus(state, e.id, 'running');
+    case 'container.start': {
+      const c = state.containers.get(e.id);
+      if (c) {
+        if (e.restart) c.restarts++;
+        c.status = 'running';
+      }
       break;
+    }
     case 'container.stop':
       setStatus(state, e.id, 'stopped');
       break;

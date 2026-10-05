@@ -1,27 +1,38 @@
 import * as THREE from 'three';
+import { CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
 import type { EventBus } from '../sim/bus';
 import type { EventOf, Mount } from '../sim/events';
 import type { Tweener } from '../engine/tween';
 import { ease } from '../engine/tween';
-import { addRoad } from '../world/city';
-import { CONVEYOR_TOP } from '../world/conveyor';
+import { HOIST_REST, TRUCK_BED, addRoad } from '../world/city';
 import { keys, tag, type EntityInfo } from '../world/entity';
 import { makeGate } from '../world/gate';
 import { makeLabel } from '../world/label';
 import {
+  CRANE_HEIGHT,
   FACTORY,
+  ISO_20FT,
+  UNPACK_GANTRY_HEIGHT,
+  buildCranes,
+  buildWaypoints,
+  craneYaw,
+  deployRoute,
   districts,
+  shopRoute,
+  shopToPlotRoute,
+  truckBay,
+  pullCranes,
+  pullWaypoints,
+  type CraneSpec,
   doorQueueSlot,
   factorySlot,
   feederRoute,
-  buildPath,
   hostPathSlot,
   labBenchSlot,
   lockerSlot,
   manifestSlot,
   networkBelt,
   pathSampler,
-  pullPath,
   smoothPath,
   quadletOffice,
   quadletRoute,
@@ -35,11 +46,16 @@ import { ArcLayer } from './arcs';
 
 const FACTORY_SIZE = new THREE.Vector3(FACTORY.w, FACTORY.h, FACTORY.l); // ISO 20ft proportions
 const LOCKER_SIZE = new THREE.Vector3(3.5, 4, 3.5);
-const SHED_SIZE = new THREE.Vector3(5, 3, 5);
+const OFFICE = { w: 5, h: 6, d: 5 }; // host path: small office building on the host highway
+const CARGO = ISO_20FT; // images travel as real-size 20ft shipping containers
+const HOIST_CARRY = 4; // hook length while a crane swings a container (clears the city wall)
 const BELT_HEIGHT = 1.2;
 const BELT_WIDTH = 1.6;
 const SLAT_SPACING = 1.5;
 const BELT_SPEED = 1.2; // metres per simulation second
+const TRAFFIC_SPEED = 2.5; // ambient crates between running containers
+const TRAFFIC_GAP = 7; // metres between crates in one direction
+const TRAFFIC_MAX = 96; // crates per network
 
 interface Factory {
   name: string;
@@ -48,6 +64,12 @@ interface Factory {
   cards: THREE.Mesh[]; // env var feedback cards, at the door until start
   extras: THREE.Object3D[]; // scene-level parts owned by this factory (roads, gates, feeders)
   oneOff: boolean; // --rm: removed as soon as it exits, never left abandoned
+  restartAlways: boolean; // --restart=always: podman starts it again whenever it exits
+  restarts: number;
+  label: CSS2DObject;
+  baseLabel: string;
+  running: boolean;
+  networks: Set<string>; // networks it is hooked onto with a feeder
 }
 
 /** A network as a conveyor belt; slats move along it to show it carries traffic. */
@@ -55,6 +77,7 @@ interface Belt {
   group: THREE.Group;
   slats: THREE.InstancedMesh;
   length: number;
+  traffic: THREE.InstancedMesh; // ambient crates between running members, in world coordinates
 }
 
 /**
@@ -74,16 +97,21 @@ export class Director {
   private names = new Map<string, string>(); // container id -> name
   private plots = new Map<string, number>(); // container name -> factory plot
   private factories = new Map<string, Factory>();
-  private manifests = new Map<string, THREE.Group>();
+  private manifests = new Map<string, THREE.Group>(); // image ref -> its container, kept in the warehouse
+  private imageSlots = new Map<string, number>(); // image ref -> reserved row slot in the warehouse
+  private imageStored = new Map<string, { done: Promise<void>; resolve: () => void }>(); // pulls/builds in flight
   private imageLayers = new Map<string, string[]>(); // image ref -> layer digests
   private selectedImage: string | null = null;
   private crates = new Map<string, THREE.Mesh>();
   private lockers = new Map<string, THREE.Mesh>();
-  private hostPaths = new Map<string, THREE.Mesh>();
-  private trucks = new Map<string, THREE.Mesh>();
+  private hostPaths = new Map<string, THREE.Group>();
+  private cargo = new Map<string, THREE.Group>(); // image -> its shipping container while delivered
+  private locks = new Map<string, Promise<void>>(); // cranes and drop-off spots, one container at a time
+  private spotRelease = new Map<string, () => void>(); // image -> frees the unpacking spot once it is gone
   private belts = new Map<string, Belt>(); // network name -> conveyor
   private quadlets = new Map<string, THREE.Group>(); // quadlet file -> pinned board
   private units = new Map<string, THREE.Mesh>(); // generated systemd unit -> plate on the tower
+  private trafficPaths = new Map<string, ReturnType<typeof pathSampler>>(); // `net|a|b` -> feeder-belt-feeder path
   private builds = new Map<string, { base: string; crates: THREE.Mesh[] }>(); // image being built in R&D
   private crateCount = 0;
 
@@ -98,9 +126,12 @@ export class Director {
     this.arcs = new ArcLayer(this.root, tw);
     this.layerArcs = new ArcLayer(this.root, tw);
 
-    bus.on('image.pull.start', (e) => this.enqueue(`image:${e.image}`, () => this.truckArrives(e)));
+    // Registered synchronously, so anything that needs the image (a factory copying it) waits for it to be stored.
+    bus.on('image.pull.start', (e) => this.expectImage(e.image));
+    bus.on('image.build.start', (e) => this.expectImage(e.image));
+    bus.on('image.pull.start', (e) => this.enqueue(`image:${e.image}`, () => this.pullArrives(e)));
     bus.on('image.layer.done', (e) => this.enqueue(`image:${e.image}`, () => this.shelveLayer(e)));
-    bus.on('image.pull.done', (e) => this.enqueue(`image:${e.image}`, () => this.truckLeaves(e)));
+    bus.on('image.pull.done', (e) => this.enqueue(`image:${e.image}`, () => this.pullDone(e)));
     bus.on('image.build.start', (e) => this.enqueue(`image:${e.image}`, () => this.writeContainerfile(e)));
     bus.on('image.build.layer', (e) => this.enqueue(`image:${e.image}`, () => this.commitLayer(e)));
     bus.on('image.build.done', (e) => this.enqueue(`image:${e.image}`, () => this.deliverBuild(e)));
@@ -114,11 +145,15 @@ export class Director {
       this.names.set(e.id, e.name);
       this.enqueue(this.site(e.id), () => this.buildFactory(e));
     });
-    bus.on('container.start', (e) => this.enqueue(this.site(e.id), () => this.startFactory(e.id)));
+    bus.on('container.start', (e) => this.enqueue(this.site(e.id), () => this.startFactory(e.id, e.restart)));
     bus.on('container.stop', (e) => this.enqueue(this.site(e.id), () => this.abandonFactory(e.id, false)));
     bus.on('container.exit', (e) =>
       this.enqueue(this.site(e.id), () =>
-        this.factories.get(e.id)?.oneOff && e.code === 0 ? this.finishOneOff(e.id) : this.abandonFactory(e.id, e.code !== 0),
+        this.factories.get(e.id)?.restartAlways
+          ? this.awaitRestart(e.id)
+          : this.factories.get(e.id)?.oneOff && e.code === 0
+            ? this.finishOneOff(e.id)
+            : this.abandonFactory(e.id, e.code !== 0),
       ),
     );
     bus.on('network.request', (e) => this.enqueue(this.site(e.from), () => this.sendRequest(e)));
@@ -144,10 +179,31 @@ export class Director {
     this.scene.add(this.root);
     this.arcs = new ArcLayer(this.root, this.tw);
     this.layerArcs = new ArcLayer(this.root, this.tw);
-    for (const m of [this.names, this.plots, this.factories, this.manifests, this.imageLayers, this.crates, this.lockers, this.hostPaths, this.trucks, this.belts, this.builds, this.quadlets, this.units])
+    for (const m of [this.names, this.plots, this.factories, this.manifests, this.imageSlots, this.imageStored, this.imageLayers, this.crates, this.lockers, this.hostPaths, this.cargo, this.locks, this.spotRelease, this.belts, this.builds, this.quadlets, this.units, this.trafficPaths])
       m.clear();
     this.selectedImage = null;
     this.crateCount = 0;
+    this.restCranes();
+  }
+
+  /** Cranes are part of the static city: put them back in their idle pose and drop anything they hold. */
+  private restCranes(): void {
+    for (const spec of [...pullCranes, ...buildCranes, { name: 'crane:unpack' }]) {
+      const crane = this.scene.getObjectByName(spec.name);
+      if (!crane) continue;
+      const slew = crane.getObjectByName('slew');
+      if (slew && 'from' in spec) slew.rotation.y = craneYaw(spec, spec.from);
+      const hoist = crane.getObjectByName('hoist')!;
+      this.setHoist(hoist, HOIST_REST);
+      const hook = hoist.getObjectByName('hook')!;
+      for (const load of hook.children.filter((c) => c.name !== 'block')) this.dispose(load);
+    }
+    const truck = this.scene.getObjectByName('truck:deploy');
+    if (truck) {
+      truck.position.set(truckBay.x, 0.3, truckBay.z);
+      truck.rotation.set(0, 0, 0);
+      for (const load of truck.children.filter((c) => c.name === 'rootfs' || c.userData.entity)) this.dispose(load); // copy, env cards
+    }
   }
 
   /** Resolves when every queued choreography has finished. */
@@ -169,6 +225,59 @@ export class Director {
       }
       belt.slats.instanceMatrix.needsUpdate = true;
     }
+    this.updateTraffic(now);
+  }
+
+  /**
+   * Cosmetic traffic: crates shuttle both ways between every pair of running
+   * containers on the same network, feeder -> belt -> feeder. Positions are a
+   * pure function of time, so pausing, replays and fast-forward need no state.
+   */
+  private updateTraffic(now: number): void {
+    const m = new THREE.Matrix4();
+    const q = new THREE.Quaternion();
+    const pos = new THREE.Vector3();
+    const one = new THREE.Vector3(1, 1, 1);
+    const up = new THREE.Vector3(0, 1, 0);
+    const y = 0.3 + BELT_HEIGHT + 0.3;
+    for (const [network, belt] of this.belts) {
+      const members = [...this.factories.entries()].filter(([, f]) => f.running && f.networks.has(network));
+      let n = 0;
+      for (let i = 0; i < members.length; i++) {
+        for (let j = i + 1; j < members.length; j++) {
+          const sampler = this.trafficPath(network, belt, members[i]!, members[j]!);
+          const per = Math.max(1, Math.floor(sampler.length / TRAFFIC_GAP));
+          for (let k = 0; k < per; k++) {
+            const d = (now * TRAFFIC_SPEED + (k * sampler.length) / per) % sampler.length;
+            for (const [dist, lane] of [[d, 0.45], [sampler.length - d, -0.45]] as const) {
+              if (n >= TRAFFIC_MAX) break;
+              const p = sampler.at(dist);
+              // Two lanes side by side: requests on one, replies on the other.
+              pos.set(p.x + Math.sin(p.yaw) * lane, y, p.z + Math.cos(p.yaw) * lane);
+              belt.traffic.setMatrixAt(n++, m.compose(pos, q.setFromAxisAngle(up, p.yaw), one));
+            }
+          }
+        }
+      }
+      belt.traffic.count = n;
+      belt.traffic.instanceMatrix.needsUpdate = true;
+    }
+  }
+
+  /** Crates currently shown on a network (after the last update). */
+  trafficCount(network: string): number {
+    return this.belts.get(network)?.traffic.count ?? 0;
+  }
+
+  private trafficPath(network: string, belt: Belt, [a, fa]: [string, Factory], [b, fb]: [string, Factory]) {
+    const key = `${network}|${a}|${b}`;
+    let sampler = this.trafficPaths.get(key);
+    if (!sampler) {
+      const beltZ = { z: belt.group.position.z + BELT_WIDTH / 2 };
+      sampler = pathSampler([...feederRoute(fa.slot, beltZ), ...[...feederRoute(fb.slot, beltZ)].reverse()]);
+      this.trafficPaths.set(key, sampler);
+    }
+    return sampler;
   }
 
   /**
@@ -185,7 +294,7 @@ export class Director {
     if (!image) return;
 
     this.layerArcs.highlight(keys.image(image));
-    const from = this.manifests.get(image)!.position.clone().setY(4.5);
+    const from = this.imageTop(image)!;
     for (const layer of this.imageLayers.get(image) ?? []) {
       const crate = this.crates.get(layer);
       if (!crate) continue; // not shelved yet
@@ -219,39 +328,183 @@ export class Director {
 
   // --- Image pull: cargo delivery -------------------------------------------
 
-  private async truckArrives(e: EventOf<'image.pull.start'>): Promise<void> {
-    const short = shortRef(e.image);
-    const color = imageColor(e.image);
-    // A cargo box riding the conveyor from the seaport; crates are unloaded from it at the warehouse.
-    const truck = this.mesh(color);
-    truck.scale.set(3.6, 1.6, 2.2);
-    const [sx, sz] = pullPath[0]!;
-    truck.position.set(sx, CONVEYOR_TOP + 0.8, sz);
-    truck.add(makeLabel(short));
-    tag(truck, { key: `pull:${e.image}`, kind: 'image pull', name: short });
-    this.root.add(truck);
-    this.trucks.set(e.image, truck);
-
-    await Promise.all([this.ride(truck, pullPath), this.addManifest(e.image, e.layers)]);
+  /** The image arrives at the quay as a shipping container and is craned, leg by leg, to the warehouse. */
+  private async pullArrives(e: EventOf<'image.pull.start'>): Promise<void> {
+    const releaseQuay = await this.acquire(spotKey(pullWaypoints[0]!));
+    const cargo = this.makeCargo(e.image, pullWaypoints[0]!);
+    this.reserveImage(e.image, e.layers);
+    await this.popIn(cargo);
+    this.spotRelease.set(e.image, await this.relay(cargo, pullWaypoints, pullCranes, releaseQuay));
+    await this.openCargo(cargo);
   }
 
-  /** Manifest board: the image itself, grouping its layer crates. */
-  private async addManifest(ref: string, layers: string[]): Promise<void> {
-    const slot = manifestSlot(this.manifests.size);
-    const manifest = new THREE.Group();
-    manifest.position.set(slot.x, 0.3, slot.z);
-    const pole = this.mesh(palette.stopped);
-    pole.scale.set(0.3, 3, 0.3);
-    pole.position.y = 1.5;
-    const board = this.mesh(imageColor(ref));
-    board.scale.set(3, 2, 0.3);
-    board.position.y = 3.5;
-    manifest.add(pole, board);
-    tag(manifest, { key: keys.image(ref), kind: 'image', name: shortRef(ref) });
-    this.root.add(manifest);
-    this.manifests.set(ref, manifest);
+  /** Shipping container in the image's color with a liftable lid (no label, not tagged). */
+  private makeShell(ref: string): THREE.Group {
+    const shell = new THREE.Group();
+    const body = this.mesh(imageColor(ref));
+    body.name = 'shell';
+    body.scale.set(CARGO.l, CARGO.h - 0.15, CARGO.w);
+    body.position.y = -0.075;
+    const lid = this.mesh(imageColor(ref));
+    lid.name = 'lid';
+    lid.scale.set(CARGO.l, 0.15, CARGO.w);
+    lid.position.y = CARGO.h / 2 - 0.075;
+    shell.add(body, lid);
+    return shell;
+  }
+
+  /** The image as a labelled shipping container; layer crates travel inside, and it is kept in the warehouse afterwards. */
+  private makeCargo(ref: string, [x, z]: [number, number]): THREE.Group {
+    const cargo = this.makeShell(ref);
+    cargo.position.set(x, 0.3 + CARGO.h / 2, z);
+    const label = makeLabel(shortRef(ref));
+    label.position.y = CARGO.h / 2 + 1;
+    cargo.add(label);
+    tag(cargo, { key: `cargo:${ref}`, kind: 'image pull', name: `${shortRef(ref)} · in transit` });
+    this.root.add(cargo);
+    this.cargo.set(ref, cargo);
+    return cargo;
+  }
+
+  private async popIn(obj: THREE.Object3D): Promise<void> {
+    await this.tw.tween({ duration: 0.5, ease: ease.outBack, update: (k) => obj.scale.setScalar(Math.max(k, 0.01)) });
+  }
+
+  /**
+   * Hand a container from crane to crane along `waypoints`. Each drop-off spot
+   * and crane takes one container at a time, so overlapping deliveries queue
+   * instead of stacking. Returns the release of the final (unpacking) spot.
+   */
+  private async relay(cargo: THREE.Group, waypoints: [number, number][], cranes: CraneSpec[], releaseStart: () => void): Promise<() => void> {
+    let releaseSpot = releaseStart;
+    for (const [i, spec] of cranes.entries()) {
+      const releaseNext = await this.acquire(spotKey(waypoints[i + 1]!));
+      const releaseCrane = await this.acquire(spec.name);
+      await this.craneLift(spec, cargo);
+      releaseCrane();
+      releaseSpot();
+      releaseSpot = releaseNext;
+    }
+    return releaseSpot;
+  }
+
+  /** Swing to the pick-up point, hook the container, lift, swing to the drop-off point, set it down. */
+  private async craneLift(spec: CraneSpec, cargo: THREE.Group): Promise<void> {
+    const crane = this.scene.getObjectByName(spec.name);
+    const slew = crane?.getObjectByName('slew');
+    const hoist = slew?.getObjectByName('hoist');
+    if (slew && hoist) {
+      const hook = hoist.getObjectByName('hook')!;
+      const pick = CRANE_HEIGHT - CARGO.h - 0.3; // hook block resting on the container roof
+      await this.slewTo(slew, craneYaw(spec, spec.from), 1);
+      await this.hoistTo(hoist, pick, 1);
+      hook.attach(cargo);
+      await this.hoistTo(hoist, HOIST_CARRY, 1);
+      await this.slewTo(slew, craneYaw(spec, spec.to), 2.4);
+      await this.hoistTo(hoist, pick, 1);
+      this.root.attach(cargo);
+      void this.hoistTo(hoist, HOIST_REST, 0.8);
+    }
+    // Snap exactly onto the drop-off point (also the whole move when there is no city, as in tests).
+    cargo.position.set(spec.to[0], 0.3 + CARGO.h / 2, spec.to[1]);
+  }
+
+  /** The unpacking gantry lifts the lid off; layer crates can then come out. */
+  private async openCargo(cargo: THREE.Group): Promise<void> {
+    const hoist = this.scene.getObjectByName('crane:unpack')?.getObjectByName('hoist');
+    const lid = cargo.getObjectByName('lid')!;
+    if (!hoist) return;
+    await this.hoistTo(hoist, UNPACK_GANTRY_HEIGHT - CARGO.h - 0.3, 0.6);
+    hoist.getObjectByName('hook')!.attach(lid);
+    await this.hoistTo(hoist, HOIST_REST, 0.6);
+  }
+
+  /** The gantry puts the lid back on. */
+  private async closeCargo(cargo: THREE.Group): Promise<void> {
+    const hoist = this.scene.getObjectByName('crane:unpack')?.getObjectByName('hoist');
+    const lid = hoist?.getObjectByName('lid');
+    if (!hoist || !lid) return;
+    await this.hoistTo(hoist, UNPACK_GANTRY_HEIGHT - CARGO.h - 0.3, 0.6);
+    cargo.attach(lid);
+    void this.hoistTo(hoist, HOIST_REST, 0.6);
+  }
+
+  /** Reserve the image's place in the warehouse row and remember its layers. */
+  private reserveImage(ref: string, layers: string[]): void {
+    if (!this.imageSlots.has(ref)) this.imageSlots.set(ref, this.imageSlots.size);
     this.imageLayers.set(ref, [...layers]);
-    await this.tw.tween({ duration: 0.8, ease: ease.outBack, update: (k) => manifest.scale.setScalar(Math.max(k, 0.01)) });
+  }
+
+  /**
+   * The unpacked container is kept: it moves into its place in the warehouse
+   * row and from now on stands for the image itself.
+   */
+  private async storeImage(ref: string, cargo: THREE.Group): Promise<void> {
+    const slot = manifestSlot(this.imageSlots.get(ref) ?? this.imageSlots.size);
+    const from = cargo.position.clone();
+    const to = new THREE.Vector3(slot.x, 0.3 + CARGO.h / 2, slot.z);
+    const yaw0 = cargo.rotation.y;
+    const yaw1 = Math.PI / 2; // lengthwise north-south, side by side along the row
+    const turn = THREE.MathUtils.euclideanModulo(yaw1 - yaw0 + Math.PI, Math.PI * 2) - Math.PI;
+    await this.tw.tween({
+      duration: 1.2,
+      update: (k) => {
+        cargo.position.lerpVectors(from, to, k);
+        cargo.position.y += Math.sin(k * Math.PI) * 3;
+        cargo.rotation.y = yaw0 + turn * k;
+      },
+    });
+    tag(cargo, { key: keys.image(ref), kind: 'image', name: shortRef(ref) });
+    // Neighbours in the row stagger their labels so the names do not overlap.
+    const label = cargo.children.find((c) => c instanceof CSS2DObject);
+    if (label) label.position.y = CARGO.h / 2 + 1 + ((this.imageSlots.get(ref) ?? 0) % 2) * 1.6;
+    this.manifests.set(ref, cargo);
+    this.cargo.delete(ref);
+    this.imageStored.get(ref)?.resolve();
+  }
+
+  private expectImage(ref: string): void {
+    if (this.imageStored.has(ref)) return;
+    let resolve!: () => void;
+    const done = new Promise<void>((r) => (resolve = r));
+    this.imageStored.set(ref, { done, resolve });
+  }
+
+  /** Resolves once the image's container is in the warehouse (immediately for images never pulled or built). */
+  private whenImage(ref: string): Promise<void> {
+    return this.imageStored.get(ref)?.done ?? Promise.resolve();
+  }
+
+  /** Point just above an image's container, where its arcs start. */
+  private imageTop(ref: string): THREE.Vector3 | undefined {
+    return this.manifests.get(ref)?.position.clone().setY(0.3 + CARGO.h + 0.5);
+  }
+
+  private async slewTo(slew: THREE.Object3D, yaw: number, duration: number): Promise<void> {
+    const from = slew.rotation.y;
+    const delta = THREE.MathUtils.euclideanModulo(yaw - from + Math.PI, Math.PI * 2) - Math.PI; // shortest way round
+    await this.tw.tween({ duration, update: (k) => (slew.rotation.y = from + delta * k) });
+  }
+
+  private async hoistTo(hoist: THREE.Object3D, length: number, duration: number): Promise<void> {
+    const from = hoist.getObjectByName('cable')!.scale.y;
+    await this.tw.tween({ duration, update: (k) => this.setHoist(hoist, from + (length - from) * k) });
+  }
+
+  private setHoist(hoist: THREE.Object3D, length: number): void {
+    const cable = hoist.getObjectByName('cable')!;
+    cable.scale.y = length;
+    cable.position.y = -length / 2;
+    hoist.getObjectByName('hook')!.position.y = -length;
+  }
+
+  /** Simple FIFO lock; resolves with the function that releases it. */
+  private acquire(name: string): Promise<() => void> {
+    const prev = this.locks.get(name) ?? Promise.resolve();
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    this.locks.set(name, prev.then(() => held));
+    return prev.then(() => release);
   }
 
   // --- Image build: R&D department ------------------------------------------
@@ -265,13 +518,10 @@ export class Director {
       name: `Containerfile · ${shortRef(e.image)}`,
     });
 
+    await this.whenImage(e.base);
     const reused = (this.imageLayers.get(e.base) ?? []).flatMap((l) => this.crates.get(l) ?? []);
-    const manifest = this.manifests.get(e.base);
-    const boardMesh = manifest?.children[1];
-    await Promise.all([
-      ...reused.map((c) => this.flash(c)),
-      ...(boardMesh instanceof THREE.Mesh ? [this.flash(boardMesh)] : []),
-    ]);
+    const base = this.manifests.get(e.base)?.getObjectByName('shell');
+    await Promise.all([...reused.map((c) => this.flash(c)), ...(base instanceof THREE.Mesh ? [this.flash(base)] : [])]);
   }
 
   /** A text document (Containerfile, unit file) pinned on a board, its text floating above. */
@@ -309,47 +559,44 @@ export class Director {
     await this.hop(crate, new THREE.Vector3(building.x, 3, building.z), new THREE.Vector3(slot.x, 1.5, slot.z), 0.9, 3);
   }
 
-  /** A van carries the new crates to the warehouse; the image gets its manifest and a FROM arc to its base. */
+  /** The new crates are packed into a container at R&D, craned to the warehouse and unpacked onto the shelves. */
   private async deliverBuild(e: EventOf<'image.build.done'>): Promise<void> {
     const build = this.builds.get(e.image);
     if (!build) return;
-    // A flat tray riding the conveyor from R&D to the warehouse.
-    const van = new THREE.Group();
-    const body = this.mesh(imageColor(e.image));
-    body.scale.set(4.5, 0.4, 2.2);
-    van.add(body);
-    const [sx, sz] = buildPath[0]!;
-    van.position.set(sx, CONVEYOR_TOP + 0.2, sz);
-    tag(van, { key: `build-van:${e.image}`, kind: 'image pull', name: `${shortRef(e.image)} delivery` });
-    this.root.add(van);
+    const releaseYard = await this.acquire(spotKey(buildWaypoints[0]!));
+    const cargo = this.makeCargo(e.image, buildWaypoints[0]!);
+    this.reserveImage(e.image, e.layers);
+    const lid = cargo.getObjectByName('lid')!;
+    await this.popIn(cargo);
 
-    // Load the bench crates onto the tray, then ride the belt to the warehouse.
+    // Lid up, crates in, lid down.
+    await this.tw.tween({ duration: 0.4, update: (k) => (lid.position.y = CARGO.h / 2 - 0.075 + 2.5 * k) });
     await Promise.all(
       build.crates.map(async (crate, i) => {
-        const to = new THREE.Vector3(sx, CONVEYOR_TOP + 1.4, sz - 1 + i * 2.2);
-        await this.hop(crate, crate.position.clone(), to, 0.6, 2, i * 0.15);
-        crate.scale.setScalar(2);
-        van.attach(crate);
+        const to = cargo.position.clone().add(new THREE.Vector3(-1.4 + i * 2.8, 0, 0));
+        await this.hop(crate, crate.position.clone(), to, 0.6, 3, i * 0.15);
+        crate.scale.setScalar(2.2);
+        cargo.attach(crate);
       }),
     );
-    await this.ride(van, buildPath);
+    await this.tw.tween({ duration: 0.4, update: (k) => (lid.position.y = CARGO.h / 2 - 0.075 + 2.5 * (1 - k)) });
 
-    await this.addManifest(e.image, e.layers);
+    const releaseUnpack = await this.relay(cargo, buildWaypoints, buildCranes, releaseYard);
+    await this.openCargo(cargo);
     await Promise.all(
       build.crates.map(async (crate, i) => {
         this.root.attach(crate);
         crate.rotation.set(0, 0, 0);
-        crate.scale.setScalar(2.4);
         const slot = shelfSlot(this.crateCount++);
         await this.hop(crate, crate.position.clone(), new THREE.Vector3(slot.x, slot.y + 1.2, slot.z), 0.8, 4, i * 0.2);
+        crate.scale.setScalar(2.4);
       }),
     );
-    const base = this.manifests.get(build.base);
-    const self = this.manifests.get(e.image)!;
-    const arc = base
-      ? this.arcs.connect(keys.image(build.base), keys.image(e.image), base.position.clone().setY(4.5), self.position.clone().setY(4.5), imageColor(build.base))
-      : Promise.resolve();
-    await Promise.all([arc, this.vanish(van)]);
+    await this.closeCargo(cargo);
+    await this.storeImage(e.image, cargo);
+    releaseUnpack();
+    const from = this.imageTop(build.base);
+    if (from) await this.arcs.connect(keys.image(build.base), keys.image(e.image), from, this.imageTop(e.image)!, imageColor(build.base));
     this.builds.delete(e.image);
   }
 
@@ -361,23 +608,29 @@ export class Director {
       if (crate) await this.flash(crate);
       return;
     }
-    const truck = this.trucks.get(e.image);
+    const cargo = this.cargo.get(e.image);
     const slot = shelfSlot(this.crateCount++);
     const crate = this.mesh(imageColor(e.image));
-    crate.scale.setScalar(2.4);
-    const from = truck ? truck.position.clone() : new THREE.Vector3(slot.x, 6, slot.z);
+    crate.scale.setScalar(2.2);
+    const from = cargo ? cargo.position.clone() : new THREE.Vector3(slot.x, 6, slot.z);
     crate.position.copy(from);
     tag(crate, { key: keys.layer(e.layer), kind: 'layer', name: `${e.layer} · ${shortRef(e.image)}` });
     this.root.add(crate);
     this.crates.set(e.layer, crate);
+    // Out of the open container, onto the shelf.
     await this.hop(crate, from, new THREE.Vector3(slot.x, slot.y + 1.2, slot.z), 0.8, 4);
+    crate.scale.setScalar(2.4);
   }
 
-  private async truckLeaves(e: EventOf<'image.pull.done'>): Promise<void> {
-    const truck = this.trucks.get(e.image);
-    if (!truck) return;
-    await this.vanish(truck); // unloaded at the end of the belt
-    this.trucks.delete(e.image);
+  /** All layers are shelved: close the container and keep it in the warehouse row, freeing the unpacking spot. */
+  private async pullDone(e: EventOf<'image.pull.done'>): Promise<void> {
+    const cargo = this.cargo.get(e.image);
+    if (cargo) {
+      await this.closeCargo(cargo);
+      await this.storeImage(e.image, cargo);
+    }
+    this.spotRelease.get(e.image)?.();
+    this.spotRelease.delete(e.image);
   }
 
   // --- Quadlet: unit files for systemd --------------------------------------
@@ -390,11 +643,9 @@ export class Director {
       name: e.file,
     });
     this.quadlets.set(e.file, sheet);
-    const manifest = this.manifests.get(e.image);
-    if (manifest) {
-      const to = sheet.position.clone().setY(5);
-      await this.arcs.connect(keys.image(e.image), keys.quadlet(e.file), manifest.position.clone().setY(4.5), to, imageColor(e.image));
-    }
+    await this.whenImage(e.image);
+    const from = this.imageTop(e.image);
+    if (from) await this.arcs.connect(keys.image(e.image), keys.quadlet(e.file), from, sheet.position.clone().setY(5), imageColor(e.image));
   }
 
   /**
@@ -414,15 +665,15 @@ export class Director {
 
     const slot = unitPlateSlot(this.units.size);
     const plate = this.mesh(palette.running);
-    plate.scale.set(0.3, 1.4, 4);
+    plate.scale.set(4, 1.4, 0.3);
     plate.position.set(slot.x, slot.y, slot.z);
     const label = makeLabel(unit);
-    label.position.set(1, 0, 0);
+    label.position.set(0, 0, -1);
     plate.add(label);
     tag(plate, { key: keys.unit(unit), kind: 'systemd', name: `${unit} · generated from ${file}` });
     this.root.add(plate);
     this.units.set(unit, plate);
-    await this.tw.tween({ duration: 0.6, ease: ease.outBack, update: (k) => plate.scale.set(0.3, 1.4 * Math.max(k, 0.01), 4) });
+    await this.tw.tween({ duration: 0.6, ease: ease.outBack, update: (k) => plate.scale.set(4, 1.4 * Math.max(k, 0.01), 0.3) });
     await Promise.all([
       this.flash(plate),
       this.arcs.connect(keys.quadlet(file), keys.unit(unit), sheet.position.clone().setY(5), plate.position.clone(), palette.tower),
@@ -451,18 +702,46 @@ export class Director {
   }
 
   /** Host paths live on the host land and outlive every container. */
-  private async ensureHostPath(path: string): Promise<THREE.Mesh> {
+  /** A host path is a small two-storey office building on the far side of the host highway. */
+  private async ensureHostPath(path: string): Promise<THREE.Group> {
     const existing = this.hostPaths.get(path);
     if (existing) return existing;
     const slot = hostPathSlot(this.hostPaths.size);
-    const shed = this.mesh(palette.hostPath);
-    shed.position.set(slot.x, 0.3, slot.z);
-    shed.add(makeLabel(path));
-    tag(shed, { key: keys.hostPath(path), kind: 'host path', name: path });
-    this.root.add(shed);
-    this.hostPaths.set(path, shed);
-    await this.rise(shed, SHED_SIZE, 0.3);
-    return shed;
+    const office = new THREE.Group();
+    office.position.set(slot.x, 0.3, slot.z);
+    const body = this.mesh(palette.building);
+    body.scale.set(OFFICE.w, OFFICE.h, OFFICE.d);
+    body.position.y = OFFICE.h / 2;
+    const roof = this.mesh(palette.hostPath);
+    roof.scale.set(OFFICE.w + 0.3, 0.4, OFFICE.d + 0.3);
+    roof.position.y = OFFICE.h + 0.2;
+    const unit = this.mesh(palette.stopped); // rooftop plant
+    unit.scale.set(1.4, 0.8, 1.2);
+    unit.position.set(1, OFFICE.h + 0.8, -1);
+    const door = this.mesh(palette.hostPath);
+    door.scale.set(1.1, 1.8, 0.1);
+    door.position.set(0, 0.9, -OFFICE.d / 2 - 0.05); // faces the highway (north)
+    office.add(body, roof, unit, door);
+    // Two floors of windows on every side.
+    for (let floor = 0; floor < 2; floor++)
+      for (const side of [0, 1, 2, 3])
+        for (const across of [-1.2, 1.2]) {
+          if (floor === 0 && side === 0 && Math.abs(across) < 2) continue; // ground floor front: the door
+          const win = this.mesh(palette.water);
+          const along = side % 2 === 0;
+          win.scale.set(along ? 1.1 : 0.08, 1, along ? 0.08 : 1.1);
+          const out = (side < 2 ? -1 : 1) * ((along ? OFFICE.d : OFFICE.w) / 2 + 0.04);
+          win.position.set(along ? across : out, 1.6 + floor * 2.4, along ? out : across);
+          office.add(win);
+        }
+    const label = makeLabel(path);
+    label.position.y = OFFICE.h + 2;
+    office.add(label);
+    tag(office, { key: keys.hostPath(path), kind: 'host path', name: path });
+    this.root.add(office);
+    this.hostPaths.set(path, office);
+    await this.tw.tween({ duration: 1, ease: ease.outBack, update: (k) => office.scale.set(1, Math.max(k, 0.01), 1) });
+    return office;
   }
 
   /** Scratch space (tmpfs) is a bin beside the factory and is demolished with it. */
@@ -488,7 +767,7 @@ export class Director {
           }
           case 'bind': {
             const shed = await this.ensureHostPath(m.source);
-            const to = shed.position.clone().setY(SHED_SIZE.y + 0.5);
+            const to = shed.position.clone().setY(OFFICE.h + 1);
             return this.arcs.connect(keys.container(id), keys.hostPath(m.source), roof, to, palette.hostPath);
           }
           case 'tmpfs':
@@ -504,6 +783,7 @@ export class Director {
     let plot = this.plots.get(e.name);
     if (plot === undefined) this.plots.set(e.name, (plot = this.plots.size));
     const slot = factorySlot(plot);
+    await this.whenImage(e.image); // the image's container must be in the warehouse to be copied
     const group = new THREE.Group();
     group.position.set(slot.x, 0.3, slot.z);
 
@@ -517,7 +797,8 @@ export class Director {
     group.add(stack);
     const boards = this.makeBoards();
     group.add(boards);
-    const label = makeLabel(`${e.name} (${e.id})${e.autoRemove ? ' · --rm' : ''}`);
+    const baseLabel = `${e.name} (${e.id})${e.autoRemove ? ' · --rm' : ''}${e.restart ? ' · --restart=always' : ''}`;
+    const label = makeLabel(baseLabel);
     label.position.set(0, FACTORY_SIZE.y + 4, 0);
     group.add(label);
     if (e.autoRemove) {
@@ -532,21 +813,130 @@ export class Director {
     tag(group, { key: keys.container(e.id), kind: 'container', name: `${e.name} · ${e.id}` });
 
     this.root.add(group);
-    const factory: Factory = { name: e.name, group, slot, cards: [], extras: [], oneOff: !!e.autoRemove };
+    const factory: Factory = {
+      name: e.name,
+      group,
+      slot,
+      cards: [],
+      extras: [],
+      oneOff: !!e.autoRemove,
+      restartAlways: e.restart === 'always',
+      restarts: 0,
+      label,
+      baseLabel,
+      running: false,
+      networks: new Set(),
+    };
     this.factories.set(e.id, factory);
-    // TODO: unboxing — carry crates from the shelf and stack them as layers.
+    // A copy of the image's container (the warehouse keeps the original) is trucked to the plot
+    // and unloaded there; the factory rises around it. With env vars, the truck first collects
+    // their feedback cards at the Demo Shopping Center.
+    const image = this.manifests.get(e.image);
+    if (image) {
+      const copy = this.makeShell(e.image);
+      copy.name = 'rootfs';
+      copy.position.copy(image.position);
+      copy.rotation.copy(image.rotation);
+      this.root.add(copy);
+      await this.truckToPlot(copy, factory, e.env.length ? () => this.makeCards(e, factory) : undefined);
+      group.attach(copy);
+    }
     await this.rise(body, FACTORY_SIZE, 0);
     const band = group.getObjectByName('band');
     if (band) band.visible = true;
 
     const roof = new THREE.Vector3(slot.x, FACTORY_SIZE.y + 0.5, slot.z);
     const links: Promise<void>[] = [this.deliverFeedback(e, factory), this.connectStorage(e.id, factory, e.mounts)];
-    const manifest = this.manifests.get(e.image);
-    if (manifest) {
-      const from = manifest.position.clone().setY(4.5);
-      links.push(this.arcs.connect(keys.image(e.image), keys.container(e.id), from, roof, imageColor(e.image)));
-    }
+    const from = this.imageTop(e.image);
+    if (from) links.push(this.arcs.connect(keys.image(e.image), keys.container(e.id), from, roof, imageColor(e.image)));
     await Promise.all(links);
+  }
+
+  /**
+   * The deploy truck loads `copy` at its bay, drives to the plot, unloads it
+   * onto the plot and heads back. One truck: deliveries queue for it.
+   */
+  private async truckToPlot(copy: THREE.Group, factory: Factory, pickup?: () => THREE.Mesh[]): Promise<void> {
+    const slot = factory.slot;
+    const onPlot = new THREE.Vector3(slot.x, 0.3 + CARGO.h / 2, slot.z);
+    const truck = this.scene.getObjectByName('truck:deploy');
+    if (!truck) {
+      copy.position.copy(onPlot); // no city (tests): just place it
+      copy.rotation.set(0, Math.PI / 2, 0);
+      return;
+    }
+    const release = await this.acquire('truck:deploy');
+    const route = deployRoute(slot);
+    const bed = new THREE.Vector3(TRUCK_BED.x, TRUCK_BED.top + CARGO.h / 2, 0);
+
+    // Load: the copy hops out of the warehouse row onto the flatbed.
+    await this.placeOn(copy, truck.localToWorld(bed.clone()), truck.rotation.y, 1);
+    truck.attach(copy);
+    copy.position.copy(bed);
+    copy.rotation.set(0, 0, 0);
+
+    let cards: THREE.Mesh[] = [];
+    if (pickup) {
+      // Detour via the Demo Shopping Center: env cards hop onto the container roof.
+      await this.ride(truck, shopRoute(), 3);
+      cards = pickup();
+      await Promise.all(
+        cards.map(async (card, i) => {
+          const onRoof = new THREE.Vector3(TRUCK_BED.x - 2.2 + (i % 4) * 1.5, TRUCK_BED.top + CARGO.h + 0.1 + Math.floor(i / 4) * 0.2, 0);
+          await this.hop(card, card.position.clone(), truck.localToWorld(onRoof.clone()), 0.8, 4, i * 0.15);
+          truck.attach(card);
+          card.rotation.set(0, 0, 0);
+        }),
+      );
+      const onward = shopToPlotRoute(slot);
+      await this.turnTo(truck, pathSampler(onward).at(0).yaw, 0.5);
+      await this.ride(truck, onward, 3.5);
+    } else {
+      await this.ride(truck, route, 3);
+    }
+
+    // Unload onto the plot, lengthwise north-south like the factory that will rise around it;
+    // the cards queue at the door until the container starts.
+    this.root.attach(copy);
+    await Promise.all([
+      this.placeOn(copy, onPlot, Math.PI / 2, 0.8, 2),
+      ...cards.map(async (card, i) => {
+        this.root.attach(card);
+        const q = doorQueueSlot(slot, i);
+        await this.hop(card, card.position.clone(), new THREE.Vector3(q.x, 0.45, q.z), 0.6, 2, 0.3 + i * 0.12);
+        card.rotation.set(0, 0, 0);
+      }),
+    ]);
+
+    // Turn round and drive back to the bay; the factory carries on without waiting.
+    void (async () => {
+      const back = [...route].reverse();
+      await this.turnTo(truck, pathSampler(back).at(0).yaw, 0.5);
+      await this.ride(truck, back, 2.5);
+      await this.turnTo(truck, 0, 0.5); // parked facing east, ready for the next load
+      release();
+    })();
+  }
+
+  private async turnTo(obj: THREE.Object3D, yaw: number, duration: number): Promise<void> {
+    const yaw0 = obj.rotation.y;
+    const turn = THREE.MathUtils.euclideanModulo(yaw - yaw0 + Math.PI, Math.PI * 2) - Math.PI;
+    await this.tw.tween({ duration, update: (k) => (obj.rotation.y = yaw0 + turn * k) });
+  }
+
+  /** Lift `obj` in an arc to `to`, turning it to `yaw` on the way. */
+  private async placeOn(obj: THREE.Object3D, to: THREE.Vector3, yaw: number, duration: number, height = 4): Promise<void> {
+    const from = obj.position.clone();
+    const yaw0 = obj.rotation.y;
+    const turn = THREE.MathUtils.euclideanModulo(yaw - yaw0 + Math.PI, Math.PI * 2) - Math.PI;
+    await this.tw.tween({
+      duration,
+      update: (k) => {
+        obj.position.lerpVectors(from, to, k);
+        obj.position.y += Math.sin(k * Math.PI) * height;
+        obj.rotation.y = yaw0 + turn * k;
+      },
+    });
   }
 
   /** Crossed planks over the front wall, hidden until the building is abandoned. */
@@ -566,26 +956,40 @@ export class Director {
   }
 
   /** Env vars arrive from the Demo Shopping Center as feedback cards and queue at the door. */
-  private async deliverFeedback(e: EventOf<'container.create'>, factory: Factory): Promise<void> {
+  /** One feedback card per env var, waiting at the Demo Shopping Center. */
+  private makeCards(e: EventOf<'container.create'>, factory: Factory): THREE.Mesh[] {
     const sc = districts.shoppingCenter;
-    const origin = new THREE.Vector3(sc.x, 4, sc.z);
+    return e.env.map((env) => {
+      const card = this.mesh(env.secret ? palette.secret : palette.card);
+      card.scale.set(1.2, 0.15, 0.9);
+      card.position.set(sc.x, 4, sc.z);
+      tag(card, { key: keys.env(e.id, env.name), kind: env.secret ? 'secret' : 'env var', name: env.name });
+      this.root.add(card);
+      factory.cards.push(card);
+      return card;
+    });
+  }
+
+  /** Env cards not brought by the truck (no city, or no image to deploy) fly straight to the door queue. */
+  private async deliverFeedback(e: EventOf<'container.create'>, factory: Factory): Promise<void> {
+    if (factory.cards.length) return; // already delivered by the deploy truck
+    const cards = this.makeCards(e, factory);
     await Promise.all(
-      e.env.map((env, i) => {
-        const card = this.mesh(env.secret ? palette.secret : palette.card);
-        card.scale.set(1.2, 0.15, 0.9);
-        card.position.copy(origin);
-        tag(card, { key: keys.env(e.id, env.name), kind: env.secret ? 'secret' : 'env var', name: env.name });
-        this.root.add(card);
-        factory.cards.push(card);
+      cards.map((card, i) => {
         const q = doorQueueSlot(factory.slot, i);
-        return this.hop(card, origin, new THREE.Vector3(q.x, 0.45, q.z), 1.6, 10, i * 0.25);
+        return this.hop(card, card.position.clone(), new THREE.Vector3(q.x, 0.45, q.z), 1.6, 10, i * 0.25);
       }),
     );
   }
 
-  private async startFactory(id: string): Promise<void> {
+  private async startFactory(id: string, restart = false): Promise<void> {
     const f = this.factories.get(id);
     if (!f) return;
+    if (restart) {
+      // Started again by the restart policy: count it on the label.
+      f.restarts++;
+      f.label.element.textContent = `${f.baseLabel} · ↻ ${f.restarts}`;
+    }
     // Feedback is processed at start: cards go in and are pinned to the front (door) wall, two per row.
     const wall = f.slot.z + FACTORY_SIZE.z / 2 + 0.1;
     const waiting = f.cards.filter((c) => c.parent !== f.group);
@@ -613,12 +1017,14 @@ export class Director {
       this.recolor(this.part(f, 'stack'), palette.running),
       ...this.feeders(f).map((m) => this.recolor(m, palette.network)),
     ]);
+    f.running = true;
   }
 
   /** Stopped or exited: the building stays, dark and boarded up, no green stack. */
   private async abandonFactory(id: string, failed: boolean): Promise<void> {
     const f = this.factories.get(id);
     if (!f) return;
+    f.running = false;
     await Promise.all([
       this.recolor(this.part(f, 'body'), palette.abandoned),
       this.recolor(this.part(f, 'stack'), failed ? palette.error : palette.abandoned),
@@ -629,10 +1035,24 @@ export class Director {
     await this.tw.tween({ duration: 0.4, ease: ease.outBack, update: (k) => boards.scale.setScalar(Math.max(k, 0.01)) });
   }
 
+  /**
+   * Exited under --restart=always: not abandoned, just between runs. The stack
+   * and feeders go amber until podman starts it again.
+   */
+  private async awaitRestart(id: string): Promise<void> {
+    const f = this.factories.get(id);
+    if (!f) return;
+    f.running = false;
+    const stack = this.part(f, 'stack');
+    if (stack) await this.flash(stack);
+    await Promise.all([this.recolor(stack, palette.network), ...this.feeders(f).map((m) => this.recolor(m, palette.abandoned))]);
+  }
+
   /** A one-off that succeeded: lights go out and the stack flashes once; --rm removes it next. */
   private async finishOneOff(id: string): Promise<void> {
     const f = this.factories.get(id);
     if (!f) return;
+    f.running = false;
     const stack = this.part(f, 'stack');
     if (stack) await this.flash(stack);
     await Promise.all([this.recolor(stack, palette.stopped), ...this.feeders(f).map((m) => this.recolor(m, palette.abandoned))]);
@@ -663,6 +1083,8 @@ export class Director {
   private async demolishFactory(id: string): Promise<void> {
     const f = this.factories.get(id);
     if (!f) return;
+    f.running = false;
+    for (const key of this.trafficPaths.keys()) if (key.split('|').includes(id)) this.trafficPaths.delete(key);
     await this.arcs.disconnect(keys.container(id));
     // Cards still waiting at the door and expose roads are not children of the group.
     const loose = [...f.cards.filter((c) => c.parent !== f.group), ...f.extras];
@@ -714,7 +1136,15 @@ export class Director {
     tag(group, { key: keys.network(e.name), kind: 'network', name: `${e.name} · ${e.driver} ${e.subnet}` });
     this.root.add(group);
 
-    const belt: Belt = { group, slats, length: lane.length };
+    const traffic = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(0.6, 0.5, 0.6),
+      new THREE.MeshStandardMaterial({ color: palette.card, flatShading: true }),
+      TRAFFIC_MAX,
+    );
+    traffic.count = 0;
+    traffic.frustumCulled = false; // instances span the whole district, not the base geometry's bounds
+    this.root.add(traffic);
+    const belt: Belt = { group, slats, length: lane.length, traffic };
     this.belts.set(e.name, belt);
     this.update(0);
     // Unroll from the west end.
@@ -738,6 +1168,7 @@ export class Director {
     tag(feeder, { key: `netlink:${e.container}:${e.network}`, kind: 'network', name: `${e.network} · ${f.name}` });
     this.root.add(feeder);
     f.extras.push(feeder);
+    f.networks.add(e.network);
 
     // Lay each segment from its start point, like a belt being extended.
     const route = feederRoute(f.slot, { z: belt.group.position.z + BELT_WIDTH / 2 });
@@ -754,7 +1185,7 @@ export class Director {
         ease: ease.linear,
         update: (k) => {
           seg.scale.set(Math.max(len * k, 0.01), 0.3, 1);
-          seg.position.set(ax + ((bx - ax) * k) / 2, BELT_HEIGHT - 0.15, az + ((bz - az) * k) / 2);
+          seg.position.set(ax + ((bx - ax) * k) / 2, 0.3 + BELT_HEIGHT - 0.15, az + ((bz - az) * k) / 2); // top flush with the belt
         },
       });
     }
@@ -881,4 +1312,8 @@ export class Director {
 
 function shortRef(ref: string): string {
   return ref.split('/').pop() ?? ref;
+}
+
+function spotKey([x, z]: [number, number]): string {
+  return `spot:${x},${z}`;
 }

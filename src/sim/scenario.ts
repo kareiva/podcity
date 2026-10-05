@@ -6,7 +6,7 @@ export interface ScheduledEvent {
   event: SimEvent;
 }
 
-export type StepId = 'pull' | 'network' | 'deploy' | 'env' | 'expose' | 'storage' | 'build' | 'quadlet' | 'migrate';
+export type StepId = 'pull' | 'network' | 'deploy' | 'env' | 'migrate' | 'expose' | 'storage' | 'build' | 'quadlet' | 'metrics';
 
 export interface Step {
   id: StepId;
@@ -22,6 +22,7 @@ const NGINX = 'registry.access.redhat.com/ubi9/nginx-124:latest';
 const POSTGRES = 'registry.access.redhat.com/ubi9/postgresql-16:latest';
 const NET = 'backend';
 const CUSTOM = 'localhost/podcity-web:1.0';
+const METRICS_EVERY = 10; // seconds the metrics collector runs before exiting and being restarted
 
 /**
  * Default walkthrough as independently replayable steps. Mounts, env and
@@ -117,6 +118,24 @@ export function defaultSteps(seed = 42): Step[] {
       at(0.3, { type: 'network.connect', container: 'db-2', network: NET, ports: [] });
     }),
 
+    step('migrate', 'Migrate', 'A one-off db-migrate container from the same postgresql-16 image runs with --rm: it reaches db by name over backend, applies the migration, exits 0 and is removed straight away. The image stays.', (at) => {
+      at(0, {
+        type: 'container.create',
+        id: 'migrate-1',
+        name: 'db-migrate',
+        image: POSTGRES,
+        mounts: migrateMounts,
+        env: migrateEnv,
+        autoRemove: true,
+        command: 'psql -f /migrations/001_init.sql',
+      });
+      at(3.5, { type: 'container.start', id: 'migrate-1' });
+      at(0.3, { type: 'network.connect', container: 'migrate-1', network: NET, ports: [] });
+      at(1, { type: 'network.request', from: 'migrate-1', to: 'db-2', network: NET, label: 'psql -> db:5432 · 001_init.sql' });
+      at(3, { type: 'container.exit', id: 'migrate-1', code: 0 });
+      at(0.5, { type: 'container.remove', id: 'migrate-1' }); // --rm
+    }),
+
     step('expose', 'Expose', 'web is re-created with -p 8080:8080 (UBI nginx listens on 8080 as non-root); a road leads through a gate in the wall to the host.', (at) => {
       at(0, { type: 'container.remove', id: 'web-1' });
       at(0.5, { type: 'container.create', id: 'web-2', name: 'web', image: NGINX, mounts: [], env: [] });
@@ -136,7 +155,7 @@ export function defaultSteps(seed = 42): Step[] {
       at(0.3, { type: 'network.connect', container: 'db-3', network: NET, ports: [] });
     }),
 
-    step('build', 'R&D', 'The R&D department writes a Containerfile FROM the UBI nginx image. podman build reuses all of its layers, commits one new layer per COPY, and delivers the custom image to the warehouse.', (at) => {
+    step('build', 'Containerfile', 'The R&D department writes a Containerfile FROM the UBI nginx image. podman build reuses all of its layers, commits one new layer per COPY, and delivers the custom image to the warehouse.', (at) => {
       at(0, { type: 'image.build.start', image: CUSTOM, base: NGINX, containerfile });
       containerfile
         .filter((line) => line.startsWith('COPY'))
@@ -149,22 +168,21 @@ export function defaultSteps(seed = 42): Step[] {
       at(2, { type: 'systemd.daemon-reload', generated: [{ quadlet: 'web.container', unit: 'web.service' }] });
     }),
 
-    step('migrate', 'Migrate', 'A one-off db-migrate container from the same postgresql-16 image runs with --rm: it reaches db by name over backend, applies the migration, exits 0 and is removed straight away. The image and the db data stay.', (at) => {
+
+    step('metrics', 'Metrics', `A metrics-collector from the plain UBI image runs a short scrape and exits; --restart=always starts it again, so it cycles every ${METRICS_EVERY} seconds for as long as the city runs.`, (at) => {
       at(0, {
         type: 'container.create',
-        id: 'migrate-1',
-        name: 'db-migrate',
-        image: POSTGRES,
-        mounts: migrateMounts,
-        env: migrateEnv,
-        autoRemove: true,
-        command: 'psql -f /migrations/001_init.sql',
+        id: 'metrics-1',
+        name: 'metrics-collector',
+        image: UBI,
+        mounts: [],
+        env: [],
+        restart: 'always',
+        command: `sh -c 'curl -s http://web:8080/ >/dev/null; sleep ${METRICS_EVERY}'`,
+        runFor: METRICS_EVERY,
       });
-      at(3.5, { type: 'container.start', id: 'migrate-1' });
-      at(0.3, { type: 'network.connect', container: 'migrate-1', network: NET, ports: [] });
-      at(1, { type: 'network.request', from: 'migrate-1', to: 'db-3', network: NET, label: 'psql -> db:5432 · 001_init.sql' });
-      at(3, { type: 'container.exit', id: 'migrate-1', code: 0 });
-      at(0.5, { type: 'container.remove', id: 'migrate-1' }); // --rm
+      at(3.5, { type: 'container.start', id: 'metrics-1' });
+      at(0.3, { type: 'network.connect', container: 'metrics-1', network: NET, ports: [] });
     }),
   ];
 }

@@ -111,9 +111,10 @@ function describe(e: SimEvent): string {
     case 'image.build.layer': return `  ${e.instruction} --> ${e.layer}`;
     case 'image.build.done': return `  COMMIT ${e.image}`;
     case 'container.create':
+      if (e.restart) return `podman run -d --restart=${e.restart} --name ${e.name}${e.mounts.map(mountFlag).join('')}${e.env.map((v) => ` -e ${v.name}`).join('')} ${e.image.split('/').pop()}${e.command ? ` ${e.command}` : ''}`;
       if (e.autoRemove) return `podman run --rm --name ${e.name}${e.mounts.map(mountFlag).join('')}${e.env.map((v) => ` -e ${v.name}`).join('')} ${e.image.split('/').pop()}${e.command ? ` ${e.command}` : ''}`;
       return `podman create --name ${e.name}${e.mounts.map(mountFlag).join('')}${e.env.map((v) => ` -e ${v.name}`).join('')} ${e.image.split('/').pop()}`;
-    case 'container.start': return `podman start ${e.id}`;
+    case 'container.start': return e.restart ? `  ${e.id} restarted (--restart=always)` : `podman start ${e.id}`;
     case 'container.stop': return `podman stop ${e.id}`;
     case 'container.exit': return `  ${e.id} exited (${e.code})${e.reason ? `: ${e.reason}` : ''}`;
     case 'container.remove': return `podman rm -f ${e.id}`;

@@ -6,6 +6,7 @@ import { EventBus } from '../sim/bus';
 import { defaultSteps } from '../sim/scenario';
 import { Simulator } from '../sim/simulator';
 import { entityOf, keys, type EntityKind } from '../world/entity';
+import { CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
 import { Director } from './director';
 
 function kinds(scene: THREE.Scene): Map<EntityKind, string[]> {
@@ -48,7 +49,7 @@ describe('Director fast-forward', () => {
     const { scene, director } = await fastForward(defaultSteps().length);
     expect(director.isIdle).toBe(true);
     const k = kinds(scene);
-    expect(k.get('container')?.sort()).toEqual(['ctr:db-3', 'ctr:web-3']);
+    expect(k.get('container')?.sort()).toEqual(['ctr:db-3', 'ctr:metrics-1', 'ctr:web-3']);
     expect(k.get('volume')).toEqual(['vol:pgdata']);
     expect(k.get('host path')?.sort()).toEqual(['host:/home/user/migrations', 'host:/home/user/site']); // sheds outlive the one-off
     expect(k.get('scratch')).toHaveLength(1);
@@ -57,11 +58,17 @@ describe('Director fast-forward', () => {
     expect(k.get('env var')).toHaveLength(2);
     expect(k.get('layer')).toHaveLength(7); // ubi, nginx-124, postgresql-16 share UBI/s2i-core; podcity-web adds 2 on top of nginx
     expect(k.get('image')).toHaveLength(4);
+    // Images are kept as their shipping containers; every factory holds a copy of its image's container.
+    scene.traverse((o) => {
+      const info = o.userData.entity as { kind: string } | undefined;
+      if (info?.kind === 'image') expect(o.getObjectByName('lid')).toBeDefined();
+      if (info?.kind === 'container') expect(o.getObjectByName('rootfs')).toBeDefined();
+    });
     expect(k.get('containerfile')).toEqual(['build:localhost/podcity-web:1.0']);
     expect(k.get('image pull')).toBeUndefined(); // trucks and the R&D van left
     expect(k.get('quadlet')).toEqual(['quadlet:web.container']);
     expect(k.get('systemd')).toEqual(['unit:web.service']); // the static tower is not part of the director's scene
-    expect(k.get('network')?.sort()).toEqual(['net:backend', 'netlink:db-3:backend', 'netlink:web-3:backend']);
+    expect(k.get('network')?.sort()).toEqual(['net:backend', 'netlink:db-3:backend', 'netlink:metrics-1:backend', 'netlink:web-3:backend']);
   });
 
   it('hooks each container onto the backend belt when it starts in the deploy step', async () => {
@@ -100,6 +107,41 @@ describe('Director fast-forward', () => {
     sim.update(Number.POSITIVE_INFINITY);
     await director.idle();
     expect(kinds(scene).get('container')).not.toContain('ctr:migrate-1');
+  });
+
+  it('runs crates between web and db over the belt only while both are running', async () => {
+    const steps = defaultSteps();
+    const through = (id: string) => steps.findIndex((s) => s.id === id) + 1;
+    const afterDeploy = await fastForward(through('deploy')); // db crashed
+    afterDeploy.director.update(10);
+    expect(afterDeploy.director.trafficCount('backend')).toBe(0);
+    const afterEnv = await fastForward(through('env')); // db re-created and running
+    afterEnv.director.update(10);
+    expect(afterEnv.director.trafficCount('backend')).toBeGreaterThan(0);
+    expect(afterEnv.director.trafficCount('backend') % 2).toBe(0); // both directions
+  });
+
+  it('restarts the metrics collector in place: never boarded up, counting restarts', async () => {
+    const steps = defaultSteps();
+    const metrics = steps.findIndex((s) => s.id === 'metrics');
+    const { scene, director, sim } = await fastForward(metrics);
+    sim.begin(metrics, 0);
+    sim.update(60); // step events, then a few exit/restart cycles
+    await director.idle();
+    const ctr = [...(kinds(scene).get('container') ?? [])];
+    expect(ctr).toContain('ctr:metrics-1');
+    const boarded: string[] = [];
+    scene.traverse((o) => {
+      if (o.name === 'boards' && o.visible) boarded.push(entityOf(o)!.key);
+    });
+    expect(boarded).toEqual([]);
+    const restarts = sim.state.containers.get('metrics-1')!.restarts;
+    expect(restarts).toBeGreaterThanOrEqual(3);
+    let label = '';
+    scene.traverse((o) => {
+      if (entityOf(o)?.key === 'ctr:metrics-1' && o instanceof CSS2DObject) label = o.element.textContent ?? '';
+    });
+    expect(label).toContain(`↻ ${restarts}`);
   });
 
   it('reset clears everything for a replay', async () => {

@@ -17,27 +17,104 @@ export const districts = {
   quadlet: { x: -54, z: 28, w: 16, d: 12 }, // Quadlet department: writes unit files for systemd
   factories: { x: 10, z: -10, w: 60, d: 40 },
   lockers: { x: 36, z: 30, w: 30, d: 16 }, // secured yard, fenced; next to the freight station
-  businessCenter: { x: -95, z: 60, w: 12, d: 12 }, // systemd / Quadlet: host side, outside the wall
-  shoppingCenter: { x: 25, z: 62, w: 14, d: 10 }, // demo entry point, by the wall
+  businessCenter: { x: -48, z: 87, w: 12, d: 12 }, // systemd: host side, outside the wall, on the host highway's north roadside
+  shoppingCenter: { x: -34, z: 30, w: 14, d: 10 }, // demo entry point, next to the Quadlet department, clear of the port roads south
   freight: { x: 65, z: 45, w: 20, d: 20 },
   hostLand: { x: 0, z: 100, w: 140, d: 12 }, // host filesystem: a highway beyond the wall
 } satisfies Record<string, Pad>;
 
 export type DistrictId = keyof typeof districts;
 
-/** Conveyor from the seaport, through the wall, into the warehouse (control points). */
-export const pullRoute: [number, number][] = [
-  [-92, 0],
-  [-CITY_RADIUS, 0],
-  [-66, -8],
-  [-50, -10],
+/** Where image containers are opened in the warehouse, under the unpacking gantry. */
+export const unpackSpot = { x: -54, z: -8 };
+
+/** Drop-off points an image container is craned between: seaport quay -> (over the wall) -> warehouse. */
+export const pullWaypoints: [number, number][] = [
+  [-96, 0],
+  [unpackSpot.x, unpackSpot.z],
 ];
+
+/** R&D yard -> warehouse. */
+export const buildWaypoints: [number, number][] = [
+  [-37, -45],
+  [unpackSpot.x, unpackSpot.z],
+];
+
+export const CRANE_HEIGHT = 20; // tall enough for one crane to span each route
+export const UNPACK_GANTRY_HEIGHT = 7;
+
+/** A tower crane lifting containers from one drop-off point to the next; both lie on its jib's circle. */
+export interface CraneSpec {
+  name: string;
+  x: number;
+  z: number;
+  radius: number;
+  from: [number, number];
+  to: [number, number];
+}
+
+/**
+ * One crane per leg between waypoints. The mast stands off to one side of the
+ * leg (`side`), so the jib swings 120 degrees between pick-up and drop-off.
+ */
+function relayCranes(prefix: string, waypoints: [number, number][], side: 1 | -1): CraneSpec[] {
+  return waypoints.slice(1).map((to, i) => {
+    const from = waypoints[i]!;
+    const dx = to[0] - from[0];
+    const dz = to[1] - from[1];
+    const d = Math.hypot(dx, dz);
+    const offset = d / 2 / Math.tan(Math.PI / 3);
+    const x = (from[0] + to[0]) / 2 + (-dz / d) * offset * side;
+    const z = (from[1] + to[1]) / 2 + (dx / d) * offset * side;
+    return { name: `${prefix}:${i}`, x, z, radius: Math.hypot(d / 2, offset), from, to };
+  });
+}
+
+// Masts stand inside the wall: between the wall and the warehouse, and between the warehouse and R&D.
+export const pullCranes = relayCranes('crane:pull', pullWaypoints, 1);
+export const buildCranes = relayCranes('crane:build', buildWaypoints, 1);
+
+/** Slewing angle (rotation about y) that points a crane's jib (local +x) at a ground point. */
+export function craneYaw(crane: { x: number; z: number }, [x, z]: [number, number]): number {
+  return Math.atan2(-(z - crane.z), x - crane.x);
+}
 
 /** Dense, evenly spaced points along a smooth (centripetal Catmull-Rom) curve through `route`. */
 export function smoothPath(route: [number, number][], spacing = 0.5): [number, number][] {
   const curve = new CatmullRomCurve3(route.map(([x, z]) => new Vector3(x, 0, z)), false, 'centripetal');
   const n = Math.max(2, Math.ceil(curve.getLength() / spacing));
   return curve.getSpacedPoints(n).map((p) => [p.x, p.z]);
+}
+
+/**
+ * Polyline with each corner rounded by a quadratic curve of up to `radius`,
+ * resampled evenly. Unlike a spline it never swings outside its corners, so
+ * vehicles can follow it between buildings.
+ */
+export function roundedPath(route: [number, number][], radius = 3, spacing = 0.5): [number, number][] {
+  const raw: [number, number][] = [route[0]!];
+  for (let i = 1; i < route.length - 1; i++) {
+    const [px, pz] = route[i - 1]!;
+    const [cx, cz] = route[i]!;
+    const [nx, nz] = route[i + 1]!;
+    const inLen = Math.hypot(cx - px, cz - pz);
+    const outLen = Math.hypot(nx - cx, nz - cz);
+    const r = Math.min(radius, inLen / 2, outLen / 2);
+    const a: [number, number] = [cx - ((cx - px) / inLen) * r, cz - ((cz - pz) / inLen) * r];
+    const b: [number, number] = [cx + ((nx - cx) / outLen) * r, cz + ((nz - cz) / outLen) * r];
+    for (let k = 0; k <= 8; k++) {
+      const t = k / 8;
+      const u = 1 - t;
+      raw.push([u * u * a[0] + 2 * u * t * cx + t * t * b[0], u * u * a[1] + 2 * u * t * cz + t * t * b[1]]);
+    }
+  }
+  raw.push(route.at(-1)!);
+  const s = pathSampler(raw);
+  const n = Math.max(1, Math.ceil(s.length / spacing));
+  return Array.from({ length: n + 1 }, (_, i) => {
+    const p = s.at((i / n) * s.length);
+    return [p.x, p.z];
+  });
 }
 
 /** Position and heading at distance `d` along a polyline; used for belts and everything riding them. */
@@ -77,17 +154,6 @@ export function seaportLayout(): {
   };
 }
 
-/** Conveyor from the R&D department to the warehouse (control points). */
-export const buildRoute: [number, number][] = [
-  [-40, -42],
-  [-40, -30],
-  [-44, -19],
-  [-50, -10],
-];
-
-/** The image delivery conveyors as smooth paths: seaport -> warehouse <- R&D. */
-export const pullPath = smoothPath(pullRoute);
-export const buildPath = smoothPath(buildRoute);
 
 /** R&D lab building, Containerfile board and the bench where built layers wait. */
 export function rndLab(): { building: { x: number; z: number }; board: { x: number; z: number } } {
@@ -103,11 +169,11 @@ export function labBenchSlot(n: number): { x: number; z: number } {
 /** Road from the Quadlet department south to the service road (which passes the wall gate). */
 export const quadletRoad: [number, number][] = [
   [-48, 34],
-  [-48, 62],
+  [-48, 40],
 ];
 
 /** Route a unit file travels from the Quadlet department to the systemd Business Center. */
-export const quadletRoute: [number, number][] = [...quadletRoad, [-89, 62]];
+export const quadletRoute: [number, number][] = [...quadletRoad, [-48, 81]];
 
 /** Quadlet office building and the board where the unit file is pinned. */
 export function quadletOffice(): { building: { x: number; z: number }; board: { x: number; z: number } } {
@@ -115,17 +181,25 @@ export function quadletOffice(): { building: { x: number; z: number }; board: { 
   return { building: { x: q.x - 3, z: q.z - 1 }, board: { x: q.x + 5, z: q.z + 2 } };
 }
 
-/** Plate for the n-th generated unit on the city-facing (east) wall of the systemd tower. */
+/** Plate for the n-th generated unit on the city-facing (north) wall of the systemd tower. */
 export function unitPlateSlot(n: number): { x: number; y: number; z: number } {
   const b = districts.businessCenter;
-  return { x: b.x + 4.2, y: 14 - n * 2, z: b.z };
+  return { x: b.x, y: 14 - n * 2, z: b.z - 4.2 };
 }
 
-/** Road from the systemd Business Center to the Demo Shopping Center. */
+/** Road from the systemd Business Center north through a gate in the south wall, to the Demo Shopping Center's front. */
 export const serviceRoute: [number, number][] = [
-  [-89, 62],
-  [18, 62],
+  [-48, 81],
+  [-48, 40],
+  [-34, 40],
+  [-34, 35],
 ];
+
+/** Where the service road passes through the city wall. */
+export function serviceGate(): { x: number; z: number } {
+  const [x] = serviceRoute[0]!;
+  return { x, z: wallZ(x) };
+}
 
 /** z where the wall crosses a north-south line at x (south side). */
 export function wallZ(x: number): number {
@@ -157,6 +231,60 @@ export function factorySlot(n: number): { x: number; z: number } {
     x: f.x - f.w / 2 + SLOT_SPACING / 2 + col * SLOT_SPACING,
     z: f.z - f.d / 2 + BELT_LANE + SLOT_SPACING / 2 + row * SLOT_SPACING,
   };
+}
+
+/** Where the deploy truck parks and loads image containers: between the warehouse and the factory district. */
+export const truckBay = { x: -31, z: -12 };
+
+/** Lane south of a plot row (clear of the buildings and the next row) the truck drives along to a plot. */
+export function deployLaneZ(factory: { z: number }): number {
+  return factory.z + FACTORY.l / 2 + 2; // middle of the 4 m gap between plot rows
+}
+
+/** Truck route from the loading bay to just in front of a factory plot. */
+export function deployRoute(factory: { x: number; z: number }): [number, number][] {
+  const lane = deployLaneZ(factory);
+  return roundedPath([
+    [truckBay.x, truckBay.z],
+    [truckBay.x + 5, lane],
+    [factory.x - 6, lane],
+    [factory.x, lane],
+  ]);
+}
+
+/** North-south corridor between the warehouse hall and the factory district, used by the truck. */
+const TRUCK_CORRIDOR_X = -24;
+
+/** Where the truck stops in front of the Demo Shopping Center to pick up env cards. */
+export function shopStop(): { x: number; z: number } {
+  const sc = districts.shoppingCenter;
+  return { x: sc.x, z: sc.z + sc.d / 2 + 4 };
+}
+
+/** Bay -> Demo Shopping Center, down the corridor and round to its front. */
+export function shopRoute(): [number, number][] {
+  const stop = shopStop();
+  return roundedPath([
+    [truckBay.x, truckBay.z],
+    [TRUCK_CORRIDOR_X, truckBay.z + 6],
+    [TRUCK_CORRIDOR_X, stop.z - 6],
+    [TRUCK_CORRIDOR_X, stop.z],
+    [stop.x, stop.z],
+  ]);
+}
+
+/** Demo Shopping Center -> back up the corridor -> along the lane to a factory plot. */
+export function shopToPlotRoute(factory: { x: number; z: number }): [number, number][] {
+  const stop = shopStop();
+  const lane = deployLaneZ(factory);
+  return roundedPath([
+    [stop.x, stop.z],
+    [TRUCK_CORRIDOR_X, stop.z],
+    [TRUCK_CORRIDOR_X, stop.z - 6],
+    [TRUCK_CORRIDOR_X, lane + 3],
+    [TRUCK_CORRIDOR_X + 3, lane],
+    [factory.x, lane],
+  ]);
 }
 
 /** Conveyor belt of the n-th network, running east-west along the north edge of the factory district. */
@@ -207,10 +335,10 @@ export function lockerSlot(n: number): { x: number; z: number } {
   return { x: l.x - l.w / 2 + 3 + n * 5, z: l.z };
 }
 
-/** Position of the n-th image manifest board along the warehouse front. */
+/** Where the n-th image (its shipping container, standing north-south) is kept along the warehouse front. */
 export function manifestSlot(n: number): { x: number; z: number } {
   const w = districts.warehouse;
-  return { x: w.x - w.w / 2 + 3 + n * 5, z: w.z - w.d / 2 + 3 };
+  return { x: w.x - w.w / 2 + 3 + n * 6.5, z: w.z - w.d / 2 + 5 };
 }
 
 /** Where the n-th feedback card waits outside a factory door. */

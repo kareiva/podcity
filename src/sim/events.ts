@@ -32,8 +32,23 @@ export type SimEvent =
   | { type: 'image.build.layer'; image: string; instruction: string; layer: Digest }
   | { type: 'image.build.done'; image: string; layers: Digest[] }
   // autoRemove: `podman run --rm`, a one-off container removed as soon as it exits. command overrides the image's CMD.
-  | { type: 'container.create'; id: string; name: string; image: string; mounts: Mount[]; env: EnvVar[]; pod?: string; autoRemove?: boolean; command?: string }
-  | { type: 'container.start'; id: string }
+  // restart: `--restart=always`, podman starts it again whenever it exits.
+  // runFor (simulation only): seconds the workload runs before exiting by itself; drives the restart loop.
+  | {
+      type: 'container.create';
+      id: string;
+      name: string;
+      image: string;
+      mounts: Mount[];
+      env: EnvVar[];
+      pod?: string;
+      autoRemove?: boolean;
+      command?: string;
+      restart?: 'always';
+      runFor?: number;
+    }
+  // restart: started again by its restart policy rather than by `podman start`
+  | { type: 'container.start'; id: string; restart?: boolean }
   | { type: 'container.stop'; id: string }
   | { type: 'container.exit'; id: string; code: number; reason?: string }
   | { type: 'container.remove'; id: string }

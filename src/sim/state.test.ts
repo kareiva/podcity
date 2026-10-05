@@ -68,7 +68,7 @@ describe('default steps', () => {
       expect(sim.stepDone).toBe(true);
     });
     const s = sim.state;
-    expect([...s.containers.keys()].sort()).toEqual(['db-3', 'web-3']);
+    expect([...s.containers.keys()].sort()).toEqual(['db-3', 'metrics-1', 'web-3']);
     expect(s.containers.get('db-3')).toMatchObject({ status: 'running', mounts: [{ kind: 'volume', source: 'pgdata' }] });
     expect(s.containers.get('db-3')?.env.map((e) => e.name)).toContain('POSTGRESQL_PASSWORD');
     expect(s.containers.get('web-3')?.mounts.map((m) => m.kind).sort()).toEqual(['bind', 'tmpfs']);
@@ -80,7 +80,7 @@ describe('default steps', () => {
     expect(s.images.size).toBe(4); // the one-off left its image behind
     expect(s.quadlets.get('web.container')).toMatchObject({ image: 'localhost/podcity-web:1.0', unit: 'web.service' });
     expect(s.networks.get('backend')).toMatchObject({ driver: 'bridge', subnet: '10.89.0.0/24' });
-    for (const id of ['db-3', 'web-3']) expect(s.containers.get(id)?.networks, id).toEqual(['backend']);
+    for (const id of ['db-3', 'metrics-1', 'web-3']) expect(s.containers.get(id)?.networks, id).toEqual(['backend']);
     expect(s.containers.get('web-3')?.ports).toEqual([{ host: 8080, container: 8080, protocol: 'tcp' }]);
   });
 
@@ -112,5 +112,40 @@ describe('default steps', () => {
     expect(create).toMatchObject({ name: 'db-migrate', image: 'registry.access.redhat.com/ubi9/postgresql-16:latest', autoRemove: true });
     expect(migrate.map((e) => e.type).slice(-2)).toEqual(['container.exit', 'container.remove']);
     expect(migrate.find((e) => e.type === 'container.exit')).toMatchObject({ code: 0 });
+  });
+
+  it('restarts the UBI metrics collector every 10 seconds with --restart=always', () => {
+    const steps = defaultSteps();
+    const metrics = steps.findIndex((s) => s.id === 'metrics');
+    const bus = new EventBus();
+    const seen: string[] = [];
+    bus.on('container.exit', (e) => seen.push(`exit ${e.id}`));
+    bus.on('container.start', (e) => seen.push(`${e.restart ? 'restart' : 'start'} ${e.id}`));
+    const sim = new Simulator(bus, steps);
+    sim.fastForward(metrics);
+    sim.begin(metrics, 0);
+    sim.update(Number.POSITIVE_INFINITY); // the step itself; the restart loop needs finite time
+    const c = sim.state.containers.get('metrics-1')!;
+    expect(c).toMatchObject({ image: 'registry.access.redhat.com/ubi9/ubi:latest', restartPolicy: 'always', status: 'running', restarts: 0 });
+    seen.length = 0;
+    const startedAt = steps[metrics]!.events.find((e) => e.event.type === 'container.start')!.at;
+    sim.update(startedAt + 10 + 0.5); // ran its 10 s, exited
+    expect(c.status).toBe('exited');
+    sim.update(startedAt + 11 + 0.5); // restart delay passed
+    expect(c).toMatchObject({ status: 'running', restarts: 1 });
+    sim.update(startedAt + 3 * 11 + 0.5);
+    expect(c.restarts).toBe(3);
+    expect(seen.slice(0, 4)).toEqual(['exit metrics-1', 'restart metrics-1', 'exit metrics-1', 'restart metrics-1']);
+  });
+
+  it('keeps restarting a carried-over container after a replay jumps past its step', () => {
+    const steps = defaultSteps();
+    const sim = new Simulator(new EventBus(), steps);
+    sim.fastForward(steps.length); // as if replaying a later step
+    sim.begin(steps.length - 1, 100);
+    sim.update(100 + 10.5);
+    expect(sim.state.containers.get('metrics-1')!.status).toBe('exited');
+    sim.update(100 + 11.5);
+    expect(sim.state.containers.get('metrics-1')!.status).toBe('running');
   });
 });
