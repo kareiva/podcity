@@ -4,7 +4,6 @@ export const palette = {
   road: 0x55595e,
   wall: 0xb9b0a0,
   water: 0x3d7ab8,
-  host: 0x9c8a6a,
   image: 0x3b82f6, // images and layers
   running: 0x22c55e,
   stopped: 0x9ca3af,
@@ -21,6 +20,8 @@ export const palette = {
   abandoned: 0x8a8178,
   boards: 0x5b4636,
   bars: 0x374151,
+  marking: 0xf5f5f5, // road lane markings
+  shipHull: 0x1f2a44,
 } as const;
 
 /**

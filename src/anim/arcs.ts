@@ -55,6 +55,11 @@ export class ArcLayer {
     await this.tw.tween({ duration: 0.6, update: (k) => this.setFade(arc, k) });
   }
 
+  /** Number of arcs currently drawn (including ones fading in). */
+  get size(): number {
+    return this.arcs.size;
+  }
+
   /** Fade out and remove every arc that touches `key`. */
   async disconnect(key: string): Promise<void> {
     const gone = [...this.arcs].filter(([, a]) => a.from === key || a.to === key);

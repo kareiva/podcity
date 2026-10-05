@@ -2,12 +2,15 @@ import * as THREE from 'three';
 import { tag } from './entity';
 import { makeGate } from './gate';
 import { makeLabel } from './label';
-import { CITY_RADIUS, districts, pullRoute, serviceRoute, wallXWest, type DistrictId, type Pad } from './layout';
+import { addConveyor } from './conveyor';
+import { CITY_RADIUS, HIGHWAY_LANES, ISO_20FT, buildPath, seaportLayout, districts, pullPath, quadletOffice, quadletRoad, rndLab, serviceRoute, wallXWest, warehouseHall, type DistrictId, type Pad } from './layout';
 import { palette } from './palette';
 
 const DISTRICT_NAMES: Record<DistrictId, string> = {
   seaport: 'Seaport · registries',
   warehouse: 'Image Warehouse',
+  rnd: 'R&D Department · podman build',
+  quadlet: 'Quadlet Department · unit files',
   factories: 'Factory District · containers',
   lockers: 'Locker Yard · volumes',
   businessCenter: 'systemd Business Center · host',
@@ -18,8 +21,13 @@ const DISTRICT_NAMES: Record<DistrictId, string> = {
 
 const mat = (color: number) => new THREE.MeshStandardMaterial({ color, flatShading: true });
 
+/** Ambient motion of the static city, driven by the sim clock (skipped for reduced motion). */
+export interface City {
+  update(now: number): void;
+}
+
 /** Static city: ground, wall, water, district pads, roads and fixed buildings. */
-export function buildCity(scene: THREE.Scene): void {
+export function buildCity(scene: THREE.Scene): City {
   const ground = new THREE.Mesh(new THREE.CircleGeometry(CITY_RADIUS + 50, 64), mat(palette.ground));
   ground.rotation.x = -Math.PI / 2;
   ground.receiveShadow = true;
@@ -39,7 +47,7 @@ export function buildCity(scene: THREE.Scene): void {
   scene.add(wall);
 
   for (const [id, pad] of Object.entries(districts) as [DistrictId, Pad][]) {
-    const color = id === 'hostLand' || id === 'businessCenter' ? palette.host : 0xa9b89d;
+    const color = id === 'hostLand' || id === 'businessCenter' ? palette.road : 0xa9b89d; // host land is asphalt
     const mesh = new THREE.Mesh(new THREE.BoxGeometry(pad.w, 0.3, pad.d), mat(color));
     mesh.position.set(pad.x, 0.15, pad.z);
     mesh.receiveShadow = true;
@@ -50,17 +58,153 @@ export function buildCity(scene: THREE.Scene): void {
     scene.add(label);
   }
 
-  addRoad(scene, pullRoute);
+  addLaneMarkings(scene, districts.hostLand);
   addRoad(scene, serviceRoute);
+  addRoad(scene, quadletRoad);
   // The service road enters the city through a gate: systemd lives on the host.
   const [, [, serviceZ]] = serviceRoute as [[number, number], [number, number]];
   const gate = makeGate(4, true);
   gate.position.set(wallXWest(serviceZ), 0, serviceZ);
   scene.add(gate);
 
+  buildWarehouseHall(scene);
+  buildFactoryHall(scene);
   buildLockerFence(scene);
+  buildRndLab(scene);
+  buildQuadletOffice(scene);
   buildBusinessCenter(scene);
   buildShoppingCenter(scene);
+  buildSeaportSilhouette(scene);
+  const ship = buildContainerShip(scene);
+  // Image delivery conveyors, both flowing into the warehouse.
+  const conveyors = [addConveyor(scene, pullPath), addConveyor(scene, buildPath)];
+
+  return {
+    update(now) {
+      // Idling at anchor: slow bob, roll and a little yaw on the swell.
+      ship.group.position.y = ship.restY + Math.sin(now * 0.8) * 0.25;
+      ship.group.rotation.x = Math.sin(now * 0.6) * 0.025;
+      ship.group.rotation.y = Math.sin(now * 0.15) * 0.04;
+      for (const c of conveyors) c.update(now);
+    },
+  };
+}
+
+/** Near-invisible terminal shed and ship-to-shore gantry cranes reaching over the water. */
+function buildSeaportSilhouette(scene: THREE.Scene): void {
+  const port = seaportLayout();
+  const t = port.terminal;
+  const halfD = t.d / 2;
+  const shed = ghostBuilding([[-halfD, 0], [halfD, 0], [halfD, 6], [0, 8.5], [-halfD, 6]], t.w);
+  shed.rotation.y = Math.PI / 2;
+  shed.position.set(t.x, 0.3, t.z);
+  scene.add(shed);
+
+  for (const c of port.cranes) {
+    const crane = new THREE.Group();
+    crane.position.set(c.x, 0.3, c.z);
+    const part = (w: number, h: number, d: number, x: number, y: number, z: number) => {
+      const p = ghostShell(new THREE.BoxGeometry(w, h, d));
+      p.position.set(x, y, z);
+      crane.add(p);
+    };
+    // Four legs straddling the quay, a portal beam, the boom out over the water and a back-reach.
+    for (const lx of [-3, 3]) for (const lz of [-2.5, 2.5]) part(0.8, 16, 0.8, lx, 8, lz);
+    part(7, 1.2, 6, 0, 16.6, 0);
+    part(26, 1, 1.6, -14, 18, 0); // boom, seaward (west)
+    part(8, 1, 1.6, 7, 18, 0); // back-reach
+    part(3, 2.4, 3, 1.5, 19.7, 0); // machinery house
+    part(0.6, 6, 0.6, 0, 21, 0); // A-frame
+    scene.add(crane);
+  }
+}
+
+/** A low-poly container ship idling offshore: hull with a pointed bow, stern bridge, stacked containers. */
+function buildContainerShip(scene: THREE.Scene): { group: THREE.Group; restY: number } {
+  const { ship } = seaportLayout();
+  const L = ship.length;
+  const B = ship.beam;
+  const hullH = 3.5;
+  const group = new THREE.Group();
+
+  // Hull: top-view outline with a pointed bow at -z, extruded downwards.
+  const outline = new THREE.Shape([
+    new THREE.Vector2(-B / 2, L / 2),
+    new THREE.Vector2(B / 2, L / 2),
+    new THREE.Vector2(B / 2, -L / 2 + 7),
+    new THREE.Vector2(0, -L / 2),
+    new THREE.Vector2(-B / 2, -L / 2 + 7),
+  ]);
+  const hullGeo = new THREE.ExtrudeGeometry(outline, { depth: hullH, bevelEnabled: false });
+  hullGeo.rotateX(Math.PI / 2); // outline y -> world z (bow north), extrusion -> downwards from the deck
+  const hull = new THREE.Mesh(hullGeo, mat(palette.shipHull));
+  hull.position.y = 1.5; // deck height above the water line
+  const boot = new THREE.Mesh(new THREE.BoxGeometry(B + 0.05, 0.6, L - 7.5), mat(palette.error)); // red waterline band
+  boot.position.set(0, 0.2, 3.7);
+  group.add(hull, boot);
+
+  // Bridge at the stern.
+  const bridge = new THREE.Mesh(new THREE.BoxGeometry(B - 1, 6, 4), mat(palette.building));
+  bridge.position.set(0, 1.5 + 3, L / 2 - 3);
+  const wing = new THREE.Mesh(new THREE.BoxGeometry(B + 1, 0.4, 2), mat(palette.building));
+  wing.position.set(0, 1.5 + 5.5, L / 2 - 4.5);
+  const funnel = new THREE.Mesh(new THREE.BoxGeometry(1.6, 2.5, 1.6), mat(palette.shipHull));
+  funnel.position.set(0, 1.5 + 7.2, L / 2 - 2);
+  group.add(bridge, wing, funnel);
+
+  // Container stacks between bow and bridge.
+  const colors = [palette.image, palette.error, palette.network, palette.running, palette.storage, palette.pod, palette.stopped];
+  const box = { w: ISO_20FT.w / 2, h: ISO_20FT.h / 2, l: ISO_20FT.l / 2 }; // 20ft boxes, same proportions as the factories
+  const rows = Math.floor((B - 1.5) / box.w); // across the beam
+  const bays = Math.floor((L - 16) / (box.l + 0.2));
+  const containers = new THREE.InstancedMesh(new THREE.BoxGeometry(box.w - 0.06, box.h - 0.04, box.l), new THREE.MeshStandardMaterial({ flatShading: true }), rows * bays * 3);
+  const m = new THREE.Matrix4();
+  const c = new THREE.Color();
+  let n = 0;
+  for (let bay = 0; bay < bays; bay++) {
+    for (let row = 0; row < rows; row++) {
+      const tiers = 1 + ((bay * 7 + row * 3) % 3); // uneven stacks read as cargo
+      for (let tier = 0; tier < tiers; tier++) {
+        m.makeTranslation((row - (rows - 1) / 2) * box.w, 1.5 + box.h / 2 + tier * box.h, -L / 2 + 8 + bay * (box.l + 0.2));
+        containers.setMatrixAt(n, m);
+        containers.setColorAt(n, c.setHex(colors[(bay * 5 + row * 2 + tier * 3) % colors.length]!));
+        n++;
+      }
+    }
+  }
+  containers.count = n;
+  group.add(containers);
+
+  group.traverse((o) => (o.castShadow = true));
+  const restY = 0.05;
+  group.position.set(ship.x, restY, ship.z);
+  tag(group, { key: 'ship:registry', kind: 'district', name: 'Container ship · registry cargo' });
+  scene.add(group);
+  return { group, restY };
+}
+
+/** White solid edge lines and dashed lane dividers along an east-west highway. */
+function addLaneMarkings(scene: THREE.Scene, pad: Pad): void {
+  const m = new THREE.MeshBasicMaterial({ color: palette.marking });
+  const y = 0.31;
+  const lineW = 0.25;
+  for (const side of [-1, 1]) {
+    const edge = new THREE.Mesh(new THREE.BoxGeometry(pad.w, 0.02, lineW), m);
+    edge.position.set(pad.x, y, pad.z + side * (pad.d / 2 - 0.6));
+    scene.add(edge);
+  }
+  const dash = 3;
+  const gap = 3;
+  const count = Math.floor(pad.w / (dash + gap));
+  const dividers = HIGHWAY_LANES - 1;
+  const dashes = new THREE.InstancedMesh(new THREE.BoxGeometry(dash, 0.02, lineW), m, count * dividers);
+  const t = new THREE.Matrix4();
+  const laneW = (pad.d - 1.2) / HIGHWAY_LANES;
+  for (let d = 0; d < dividers; d++) {
+    const z = pad.z - pad.d / 2 + 0.6 + laneW * (d + 1);
+    for (let i = 0; i < count; i++) dashes.setMatrixAt(d * count + i, t.makeTranslation(pad.x - pad.w / 2 + dash / 2 + i * (dash + gap), y, z));
+  }
+  scene.add(dashes);
 }
 
 export function addRoad(parent: THREE.Object3D, points: [number, number][], color: number = palette.road, width = 4): THREE.Group {
@@ -80,6 +224,108 @@ export function addRoad(parent: THREE.Object3D, points: [number, number][], colo
   return group;
 }
 
+/** Gabled hall over the Image Warehouse: the shelves read as indoor storage. */
+function buildWarehouseHall(scene: THREE.Scene): void {
+  const hall = warehouseHall();
+  const h = 7;
+  const halfD = hall.d / 2;
+  const shell = ghostBuilding([[-halfD, 0], [halfD, 0], [halfD, h], [0, h + 3.5], [-halfD, h]], hall.w);
+  shell.rotation.y = Math.PI / 2; // ridge runs east-west
+  shell.position.set(hall.x, 0.3, hall.z);
+  scene.add(shell);
+}
+
+/** Sawtooth-roofed hall with a chimney over the Factory District. */
+function buildFactoryHall(scene: THREE.Scene): void {
+  const pad = districts.factories;
+  const h = 11; // clears the factories' smokestacks and labels
+  const teeth = 5; // one per plot column
+  const tooth = pad.w / teeth;
+  const profile: [number, number][] = [[-pad.w / 2, 0], [pad.w / 2, 0], [pad.w / 2, h]];
+  for (let i = teeth - 1; i >= 0; i--) {
+    const left = -pad.w / 2 + i * tooth;
+    profile.push([left, h + 3], [left, h]); // glazed riser, then the slope down to the next tooth
+  }
+  const shell = ghostBuilding(profile, pad.d);
+  shell.position.set(pad.x, 0.3, pad.z);
+  scene.add(shell);
+
+  const chimney = ghostShell(new THREE.CylinderGeometry(1.4, 1.8, 22, 8));
+  chimney.position.set(pad.x + pad.w / 2 + 2.5, 11.3, pad.z - pad.d / 2 + 6); // outside the east wall, clear of belts and plots
+  scene.add(chimney);
+}
+
+/** Extrude a building profile (x/y) along z, centred on the origin. */
+function ghostBuilding(profile: [number, number][], length: number): THREE.Group {
+  const geometry = new THREE.ExtrudeGeometry(new THREE.Shape(profile.map(([x, y]) => new THREE.Vector2(x, y))), {
+    depth: length,
+    bevelEnabled: false,
+  });
+  geometry.translate(0, 0, -length / 2);
+  return ghostShell(geometry);
+}
+
+/**
+ * Near-invisible (95% transparent) shell with a faint outline. It encloses a
+ * district without hiding it and never blocks picking of what is inside.
+ */
+function ghostShell(geometry: THREE.BufferGeometry): THREE.Group {
+  const shell = new THREE.Mesh(
+    geometry,
+    new THREE.MeshStandardMaterial({ color: palette.building, transparent: true, opacity: 0.05, depthWrite: false, side: THREE.DoubleSide }),
+  );
+  const outline = new THREE.LineSegments(
+    new THREE.EdgesGeometry(geometry),
+    new THREE.LineBasicMaterial({ color: palette.building, transparent: true, opacity: 0.25 }),
+  );
+  const group = new THREE.Group();
+  group.add(shell, outline);
+  group.traverse((o) => {
+    o.renderOrder = 1; // draw after the opaque contents it encloses
+    o.raycast = () => {};
+  });
+  return group;
+}
+
+/** R&D lab: a low research building with a rooftop antenna, where images are built. */
+function buildRndLab(scene: THREE.Scene): void {
+  const { building } = rndLab();
+  const lab = new THREE.Group();
+  lab.position.set(building.x, 0.3, building.z);
+  const body = new THREE.Mesh(new THREE.BoxGeometry(10, 5, 8), mat(palette.building));
+  body.position.y = 2.5;
+  const roof = new THREE.Mesh(new THREE.BoxGeometry(10.4, 0.6, 8.4), mat(palette.image));
+  roof.position.y = 5.3;
+  const antenna = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 4, 6), mat(palette.bars));
+  antenna.position.set(3, 7.6, -2);
+  const dish = new THREE.Mesh(new THREE.SphereGeometry(0.9, 8, 4, 0, Math.PI * 2, 0, Math.PI / 2), mat(palette.card));
+  dish.position.set(3, 9.6, -2);
+  dish.rotation.x = Math.PI; // bowl facing up
+  lab.add(body, roof, antenna, dish);
+  lab.traverse((o) => (o.castShadow = true));
+  tag(lab, { key: 'district:rnd', kind: 'district', name: 'R&D Department · podman build' });
+  scene.add(lab);
+}
+
+/** Quadlet office: a small clerk's building under systemd's slate roof color. */
+function buildQuadletOffice(scene: THREE.Scene): void {
+  const { building } = quadletOffice();
+  const office = new THREE.Group();
+  office.position.set(building.x, 0.3, building.z);
+  const body = new THREE.Mesh(new THREE.BoxGeometry(8, 4.5, 7), mat(palette.building));
+  body.position.y = 2.25;
+  const roof = new THREE.Mesh(new THREE.ConeGeometry(6, 2.5, 4), mat(palette.tower));
+  roof.position.y = 5.75;
+  roof.rotation.y = Math.PI / 4;
+  roof.scale.set(1, 1, 0.9);
+  const mailbox = new THREE.Mesh(new THREE.BoxGeometry(0.8, 1.2, 0.8), mat(palette.running));
+  mailbox.position.set(5, 0.6, 3.5);
+  office.add(body, roof, mailbox);
+  office.traverse((o) => (o.castShadow = true));
+  tag(office, { key: 'district:quadlet', kind: 'district', name: 'Quadlet Department · unit files' });
+  scene.add(office);
+}
+
 /** Secured access: vertical bars all round the locker yard, with a gated entrance facing the factories. */
 function buildLockerFence(scene: THREE.Scene): void {
   const p = districts.lockers;
@@ -89,7 +335,7 @@ function buildLockerFence(scene: THREE.Scene): void {
   const z0 = p.z - p.d / 2 - margin;
   const z1 = p.z + p.d / 2 + margin;
   const gateHalf = 2.5;
-  const spacing = 0.9;
+  const spacing = 1.8;
   const height = 3.4;
 
   const bars: [number, number][] = [];

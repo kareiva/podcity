@@ -19,6 +19,21 @@ export interface ContainerState {
   networks: string[];
   ports: Port[];
   pod?: string;
+  autoRemove?: boolean;
+  command?: string;
+}
+
+export interface NetworkState {
+  name: string;
+  driver: 'bridge';
+  subnet: string;
+}
+
+export interface QuadletState {
+  file: string; // e.g. web.container
+  path: string;
+  image: string;
+  unit?: string; // generated systemd service, after daemon-reload
 }
 
 export interface PodState {
@@ -32,6 +47,8 @@ export interface PodmanState {
   images: Map<string, ImageState>;
   containers: Map<string, ContainerState>;
   volumes: Set<string>;
+  networks: Map<string, NetworkState>;
+  quadlets: Map<string, QuadletState>;
   pods: Map<string, PodState>;
 }
 
@@ -41,6 +58,8 @@ export function createState(): PodmanState {
     images: new Map(),
     containers: new Map(),
     volumes: new Set(),
+    networks: new Map(),
+    quadlets: new Map(),
     pods: new Map(),
   };
 }
@@ -62,7 +81,13 @@ export function applyEvent(state: PodmanState, e: SimEvent): void {
       state.images.set(e.image, { ref: e.image, layers: [...e.layers], complete: false });
       break;
     case 'image.layer.done':
+    case 'image.build.layer':
       state.layers.add(e.layer);
+      break;
+    case 'image.build.done':
+      state.images.set(e.image, { ref: e.image, layers: [...e.layers], complete: true });
+      break;
+    case 'image.build.start':
       break;
     case 'image.pull.done': {
       const img = state.images.get(e.image);
@@ -80,6 +105,8 @@ export function applyEvent(state: PodmanState, e: SimEvent): void {
         networks: [],
         ports: [],
         pod: e.pod,
+        autoRemove: e.autoRemove,
+        command: e.command,
       });
       if (e.pod) state.pods.get(e.pod)?.members.push(e.id);
       break;
@@ -113,6 +140,9 @@ export function applyEvent(state: PodmanState, e: SimEvent): void {
     case 'volume.remove':
       state.volumes.delete(e.name);
       break;
+    case 'network.create':
+      state.networks.set(e.name, { name: e.name, driver: e.driver, subnet: e.subnet });
+      break;
     case 'network.connect': {
       const c = state.containers.get(e.container);
       if (c) {
@@ -121,9 +151,19 @@ export function applyEvent(state: PodmanState, e: SimEvent): void {
       }
       break;
     }
+    case 'quadlet.create':
+      state.quadlets.set(e.file, { file: e.file, path: e.path, image: e.image });
+      break;
+    case 'systemd.daemon-reload':
+      for (const g of e.generated) {
+        const q = state.quadlets.get(g.quadlet);
+        if (q) q.unit = g.unit;
+      }
+      break;
     case 'pod.create':
       state.pods.set(e.id, { id: e.id, name: e.name, members: [] });
       break;
+    case 'network.request':
     case 'kube.generate':
     case 'resource.sample':
       break;

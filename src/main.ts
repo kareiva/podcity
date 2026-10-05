@@ -20,9 +20,10 @@ const clock = new SimClock();
 const tweener = new Tweener();
 const bus = new EventBus();
 
-if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) tweener.durationScale = 0.05;
+const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+if (reducedMotion) tweener.durationScale = 0.05;
 
-buildCity(engine.scene);
+const city = buildCity(engine.scene);
 const director = new Director(engine.scene, tweener, bus);
 const sim = new Simulator(bus, defaultSteps());
 const player = new Player(sim, director, tweener, clock);
@@ -32,7 +33,7 @@ const tooltip = createTooltip(document.body);
 setupPicking(engine, (info, x, y) => {
   if (info) tooltip.show(info, x, y);
   else tooltip.hide();
-  director.arcs.highlight(info?.key ?? null);
+  director.select(info?.key ?? null);
 });
 
 void player.goTo(0);
@@ -41,4 +42,8 @@ engine.start((realDt) => {
   clock.tick(realDt);
   player.update(clock.now);
   tweener.update(clock.now);
+  if (!reducedMotion) {
+    director.update(clock.now);
+    city.update(clock.now);
+  }
 });

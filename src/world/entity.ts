@@ -5,10 +5,13 @@ export type EntityKind =
   | 'image'
   | 'layer'
   | 'image pull'
+  | 'containerfile'
+  | 'quadlet'
   | 'volume'
   | 'host path'
   | 'scratch'
   | 'port'
+  | 'network'
   | 'env var'
   | 'secret'
   | 'systemd'
@@ -39,7 +42,11 @@ export const keys = {
   container: (id: string) => `ctr:${id}`,
   image: (ref: string) => `img:${ref}`,
   layer: (digest: string) => `layer:${digest}`,
+  build: (ref: string) => `build:${ref}`,
+  quadlet: (file: string) => `quadlet:${file}`,
+  unit: (name: string) => `unit:${name}`,
   volume: (name: string) => `vol:${name}`,
+  network: (name: string) => `net:${name}`,
   hostPath: (path: string) => `host:${path}`,
   env: (container: string, name: string) => `env:${container}:${name}`,
 };

@@ -107,7 +107,11 @@ function describe(e: SimEvent): string {
     case 'image.pull.start': return `podman pull ${e.image}`;
     case 'image.layer.done': return `  ${e.cached ? 'Copying blob' : 'Fetched blob'} ${e.layer}${e.cached ? ' skipped: already exists' : ''}`;
     case 'image.pull.done': return `  ${e.image} stored`;
+    case 'image.build.start': return `podman build -t ${e.image} -f Containerfile .`;
+    case 'image.build.layer': return `  ${e.instruction} --> ${e.layer}`;
+    case 'image.build.done': return `  COMMIT ${e.image}`;
     case 'container.create':
+      if (e.autoRemove) return `podman run --rm --name ${e.name}${e.mounts.map(mountFlag).join('')}${e.env.map((v) => ` -e ${v.name}`).join('')} ${e.image.split('/').pop()}${e.command ? ` ${e.command}` : ''}`;
       return `podman create --name ${e.name}${e.mounts.map(mountFlag).join('')}${e.env.map((v) => ` -e ${v.name}`).join('')} ${e.image.split('/').pop()}`;
     case 'container.start': return `podman start ${e.id}`;
     case 'container.stop': return `podman stop ${e.id}`;
@@ -115,7 +119,11 @@ function describe(e: SimEvent): string {
     case 'container.remove': return `podman rm -f ${e.id}`;
     case 'volume.create': return `podman volume create ${e.name}`;
     case 'volume.remove': return `podman volume rm ${e.name}`;
+    case 'network.create': return `podman network create --driver ${e.driver} --subnet ${e.subnet} ${e.name}`;
     case 'network.connect': return `  ${e.container} on ${e.network} ${e.ports.map((p) => `${p.host}->${p.container}/${p.protocol}`).join(' ')}`;
+    case 'quadlet.create': return `cat > ${e.path}`;
+    case 'systemd.daemon-reload': return `systemctl --user daemon-reload  # ${e.generated.map((g) => `${g.quadlet} -> ${g.unit}`).join(', ')}`;
+    case 'network.request': return `  ${e.from} -> ${e.to} on ${e.network}: ${e.label}`;
     case 'pod.create': return `podman pod create --name ${e.name}`;
     case 'kube.generate': return `podman kube generate ${e.pod}`;
     case 'resource.sample': return `  ${e.id} cpu ${(e.cpu * 100).toFixed(0)}%`;

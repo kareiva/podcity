@@ -5,7 +5,7 @@ import { Tweener } from '../engine/tween';
 import { EventBus } from '../sim/bus';
 import { defaultSteps } from '../sim/scenario';
 import { Simulator } from '../sim/simulator';
-import { entityOf, type EntityKind } from '../world/entity';
+import { entityOf, keys, type EntityKind } from '../world/entity';
 import { Director } from './director';
 
 function kinds(scene: THREE.Scene): Map<EntityKind, string[]> {
@@ -29,24 +29,50 @@ async function fastForward(upTo: number) {
   return { scene, director, sim };
 }
 
+describe('Director selection', () => {
+  it('draws arcs from a selected image to its layers, including shared ones', async () => {
+    const { director, sim } = await fastForward(1);
+    const [ubi, , postgres] = [...sim.state.images.keys()];
+    director.select(keys.image(postgres!));
+    expect(director.layerArcs.size).toBe(sim.state.images.get(postgres!)!.layers.length);
+    director.select(keys.image(ubi!));
+    await director.idle();
+    expect(director.layerArcs.size).toBe(1);
+    director.select(null);
+    expect(director.layerArcs.size).toBe(0);
+  });
+});
+
 describe('Director fast-forward', () => {
   it('builds the final city without any frames', async () => {
-    const { scene, director } = await fastForward(5);
+    const { scene, director } = await fastForward(defaultSteps().length);
     expect(director.isIdle).toBe(true);
     const k = kinds(scene);
     expect(k.get('container')?.sort()).toEqual(['ctr:db-3', 'ctr:web-3']);
     expect(k.get('volume')).toEqual(['vol:pgdata']);
-    expect(k.get('host path')).toEqual(['host:/home/user/site']);
+    expect(k.get('host path')?.sort()).toEqual(['host:/home/user/migrations', 'host:/home/user/site']); // sheds outlive the one-off
     expect(k.get('scratch')).toHaveLength(1);
     expect(k.get('port')).toHaveLength(1);
     expect(k.get('secret')).toHaveLength(1);
     expect(k.get('env var')).toHaveLength(2);
-    expect(k.get('layer')).toHaveLength(6); // 3 + 4, base layer shared
-    expect(k.get('image pull')).toBeUndefined(); // trucks left
+    expect(k.get('layer')).toHaveLength(7); // ubi, nginx-124, postgresql-16 share UBI/s2i-core; podcity-web adds 2 on top of nginx
+    expect(k.get('image')).toHaveLength(4);
+    expect(k.get('containerfile')).toEqual(['build:localhost/podcity-web:1.0']);
+    expect(k.get('image pull')).toBeUndefined(); // trucks and the R&D van left
+    expect(k.get('quadlet')).toEqual(['quadlet:web.container']);
+    expect(k.get('systemd')).toEqual(['unit:web.service']); // the static tower is not part of the director's scene
+    expect(k.get('network')?.sort()).toEqual(['net:backend', 'netlink:db-3:backend', 'netlink:web-3:backend']);
+  });
+
+  it('hooks each container onto the backend belt when it starts in the deploy step', async () => {
+    const steps = defaultSteps();
+    const { scene } = await fastForward(steps.findIndex((s) => s.id === 'deploy') + 1);
+    const k = kinds(scene);
+    expect(k.get('network')?.sort()).toEqual(['net:backend', 'netlink:db-1:backend', 'netlink:web-1:backend']);
   });
 
   it('leaves the crashed db boarded up after deploy', async () => {
-    const { scene } = await fastForward(2);
+    const { scene } = await fastForward(defaultSteps().findIndex((s) => s.id === 'deploy') + 1);
     const db = scene.getObjectByProperty('name', 'boards');
     const boarded: string[] = [];
     scene.traverse((o) => {
@@ -56,8 +82,28 @@ describe('Director fast-forward', () => {
     expect(boarded).toEqual(['ctr:db-1']);
   });
 
+  it('runs the one-off migration without boarding it up, then removes it', async () => {
+    const steps = defaultSteps();
+    const migrate = steps.findIndex((s) => s.id === 'migrate');
+    const { scene, director, sim } = await fastForward(migrate);
+    const events = steps[migrate]!.events.map((e) => e.event);
+    const removal = events.findIndex((e) => e.type === 'container.remove');
+    sim.begin(migrate, 0);
+    sim.update(steps[migrate]!.events[removal - 1]!.at); // up to the exit, before --rm removes it
+    await director.idle();
+    const boarded: string[] = [];
+    scene.traverse((o) => {
+      if (o.name === 'boards' && o.visible) boarded.push(entityOf(o)!.key);
+    });
+    expect(kinds(scene).get('container')).toContain('ctr:migrate-1');
+    expect(boarded).toEqual([]);
+    sim.update(Number.POSITIVE_INFINITY);
+    await director.idle();
+    expect(kinds(scene).get('container')).not.toContain('ctr:migrate-1');
+  });
+
   it('reset clears everything for a replay', async () => {
-    const { scene, director } = await fastForward(5);
+    const { scene, director } = await fastForward(defaultSteps().length);
     director.reset();
     expect(kinds(scene).size).toBe(0);
   });
