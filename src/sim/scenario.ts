@@ -21,6 +21,7 @@ const UBI = 'registry.access.redhat.com/ubi9/ubi:latest';
 const NGINX = 'registry.access.redhat.com/ubi9/nginx-124:latest';
 const POSTGRES = 'registry.access.redhat.com/ubi9/postgresql-16:latest';
 const NET = 'backend';
+const PG_SECRET = 'pgpass';
 const CUSTOM = 'localhost/podcity-web:1.0';
 const METRICS_EVERY = 10; // seconds the metrics collector runs before exiting and being restarted
 
@@ -47,7 +48,7 @@ export function defaultSteps(seed = 42): Step[] {
   const dbEnv: EnvVar[] = [
     { name: 'POSTGRESQL_USER', value: 'app' },
     { name: 'POSTGRESQL_DATABASE', value: 'app' },
-    { name: 'POSTGRESQL_PASSWORD', value: '', secret: true },
+    { name: 'POSTGRESQL_PASSWORD', value: '', secret: true, secretName: PG_SECRET },
   ];
 
   const containerfile = [
@@ -63,7 +64,7 @@ export function defaultSteps(seed = 42): Step[] {
     { name: 'PGHOST', value: 'db' },
     { name: 'PGUSER', value: 'app' },
     { name: 'PGDATABASE', value: 'app' },
-    { name: 'PGPASSWORD', value: '', secret: true },
+    { name: 'PGPASSWORD', value: '', secret: true, secretName: PG_SECRET },
   ];
 
   const quadlet = [
@@ -111,8 +112,9 @@ export function defaultSteps(seed = 42): Step[] {
       at(1.5, { type: 'container.exit', id: 'db-1', code: 1, reason: 'POSTGRESQL_USER, POSTGRESQL_PASSWORD and POSTGRESQL_DATABASE must be set' });
     }),
 
-    step('env', 'Environment', 'Configuration arrives as customer feedback cards. db is re-created with them and finally runs.', (at) => {
-      at(0, { type: 'container.remove', id: 'db-1' });
+    step('env', 'Environment', 'The password goes into a podman secret held at the Secret Facility; plain settings arrive as customer feedback cards. The truck collects both on its way, and db is re-created with them and finally runs.', (at) => {
+      at(0, { type: 'secret.create', name: PG_SECRET });
+      at(1, { type: 'container.remove', id: 'db-1' });
       at(0.5, { type: 'container.create', id: 'db-2', name: 'db', image: POSTGRES, mounts: [], env: dbEnv });
       at(3.5, { type: 'container.start', id: 'db-2' });
       at(0.3, { type: 'network.connect', container: 'db-2', network: NET, ports: [] });

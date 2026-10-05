@@ -15,7 +15,7 @@ import {
   truckBay,
   type CraneSpec,
   seaportLayout,
-  districts, quadletOffice, quadletRoad, rndLab, serviceGate, serviceRoute, warehouseHall, type DistrictId, type Pad } from './layout';
+  districts, quadletOffice, quadletRoad, secretRoad, rndLab, serviceGate, serviceRoute, warehouseHall, type DistrictId, type Pad } from './layout';
 import { palette } from './palette';
 
 const DISTRICT_NAMES: Record<DistrictId, string> = {
@@ -26,7 +26,8 @@ const DISTRICT_NAMES: Record<DistrictId, string> = {
   factories: 'Factory District · containers',
   lockers: 'Locker Yard · volumes',
   businessCenter: 'systemd Business Center · host',
-  shoppingCenter: 'Demo Shopping Center',
+  shoppingCenter: 'Environmental Shopping Center',
+  secrets: 'Secret Facility · podman secrets',
   freight: 'Freight Station → OpenShift',
   hostLand: 'Host filesystem · host paths',
 };
@@ -73,6 +74,7 @@ export function buildCity(scene: THREE.Scene): City {
   addLaneMarkings(scene, districts.hostLand);
   addRoad(scene, serviceRoute);
   addRoad(scene, quadletRoad);
+  addRoad(scene, secretRoad);
   // The service road enters the city through a gate in the south wall: systemd lives on the host.
   const gatePos = serviceGate();
   const gate = makeGate(4, false);
@@ -86,6 +88,7 @@ export function buildCity(scene: THREE.Scene): City {
   buildQuadletOffice(scene);
   buildBusinessCenter(scene);
   buildShoppingCenter(scene);
+  buildSecretFacility(scene);
   buildSeaportSilhouette(scene);
   const ship = buildContainerShip(scene);
   // Image delivery: tower cranes relay containers; a gantry in the warehouse opens them.
@@ -533,6 +536,31 @@ function buildBusinessCenter(scene: THREE.Scene): void {
   scene.add(group);
 }
 
+/** Secret Facility: a windowless concrete vault with a gold door (facing its road) and a camera mast. */
+function buildSecretFacility(scene: THREE.Scene): void {
+  const p = districts.secrets;
+  const group = new THREE.Group();
+  group.position.set(p.x, 0.3, p.z);
+  const vault = new THREE.Mesh(new THREE.BoxGeometry(p.w - 1, 4, p.d - 1.5), mat(palette.tower));
+  vault.position.y = 2;
+  const roofRim = new THREE.Mesh(new THREE.BoxGeometry(p.w - 0.6, 0.4, p.d - 1.1), mat(palette.bars));
+  roofRim.position.y = 4.2;
+  const door = new THREE.Mesh(new THREE.BoxGeometry(2, 2.6, 0.2), mat(palette.secret));
+  door.position.set(0, 1.3, (p.d - 1.5) / 2 + 0.1);
+  const wheel = new THREE.Mesh(new THREE.TorusGeometry(0.45, 0.08, 6, 12), mat(palette.bars)); // vault handle
+  wheel.position.set(0, 1.4, (p.d - 1.5) / 2 + 0.25);
+  const mast = new THREE.Mesh(new THREE.BoxGeometry(0.15, 2, 0.15), mat(palette.bars));
+  mast.position.set(p.w / 2 - 1.2, 5.4, -1);
+  const camera = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.35, 0.35), mat(palette.bars));
+  camera.position.set(p.w / 2 - 1.2, 6.4, -0.8);
+  for (const m of [vault, roofRim, door, wheel, mast, camera]) {
+    m.castShadow = true;
+    group.add(m);
+  }
+  tag(group, { key: 'svc:secrets', kind: 'district', name: 'Secret Facility · podman secrets' });
+  scene.add(group);
+}
+
 /** Demo entry point beside the Quadlet department: where visitors see the running app. Faces south, onto its road. */
 function buildShoppingCenter(scene: THREE.Scene): void {
   const p = districts.shoppingCenter;
@@ -548,6 +576,6 @@ function buildShoppingCenter(scene: THREE.Scene): void {
     m.castShadow = true;
     group.add(m);
   }
-  tag(group, { key: 'svc:demo', kind: 'demo', name: 'Demo Shopping Center' });
+  tag(group, { key: 'svc:demo', kind: 'demo', name: 'Environmental Shopping Center' });
   scene.add(group);
 }

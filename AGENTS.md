@@ -90,12 +90,12 @@ Dependency direction is one-way: `sim` <- `anim` <- `world`/`engine` <- `ui`.
 | Host (outside the wall) | **Host highway** south of the wall; systemd stands on its north roadside (asphalt plot) | Narrow three-lane asphalt highway with white edge lines and dashed lane markings; published-port roads end at its edge |
 | Bind mount / host path | **Small office building** on the host highway's far (south) roadside | Two storeys, blue windows, brown roof, door facing the highway; labelled with the path. Arc from factory over the wall; survives factory demolition |
 | Scratch space (tmpfs) | **Scratch bin** beside the factory | Ephemeral; demolished with the factory |
-| Environment variables | **Customer feedback cards** | Collected by the deploy truck at the Demo Shopping Center on its way to the plot (they ride on the container roof), dropped at the factory door to queue, and are pinned to the factory wall when it starts; one card per `KEY=value`. Secret-backed vars are gold sealed cards |
+| Environment variables | **Customer feedback cards** | Collected by the deploy truck at the Environmental Shopping Center on its way to the plot (they ride on the container roof), dropped at the factory door to queue, and are pinned to the factory wall when it starts; one card per `KEY=value`. Secret-backed vars are gold sealed cards |
 | Config / mounted config files | **Blueprint binder** delivered with factory | |
 | Secrets | **Armored courier + safe** inside factory | Contents never shown, only name and mount target |
 | Quadlet unit files (`.container`) | **Quadlet Department** inside the wall, between the Image Warehouse and the systemd Business Center | Clerk's office (slate roof like systemd); the unit file is pinned on a board. Its road joins the service road and reaches systemd through the wall gate |
 | systemd / generated units | **systemd Business Center** on the host highway's north roadside, outside the Podman perimeter (city wall); its road runs north through a gate in the south wall | Office tower holding the unit files; decides which factories start at boot and restarts failed ones |
-| Demo entry point | **Demo Shopping Center** next to the Quadlet Department, clear of the published-port roads to the south | Where visitors arrive and see the running app; its front faces south onto the road that comes in through the wall gate from the systemd Business Center |
+| Demo entry point | **Environmental Shopping Center** next to the Quadlet Department, clear of the published-port roads to the south | Where visitors arrive and see the running app; its front faces south onto the road that comes in through the wall gate from the systemd Business Center |
 | `podman kube generate` + OpenShift | **Freight rail station** to the metropolis | Campus packed into a shipping container, train leaves for the OpenShift metro |
 
 ---
@@ -148,7 +148,7 @@ Rules that the scene must respect:
 - **Environment is fixed at create time.** Feedback cards are processed when
   the factory starts; changing them means building a new factory, not
   editing a running one.
-- **The Demo Shopping Center depends on the systemd Business Center.** The
+- **The Environmental Shopping Center depends on the systemd Business Center.** The
   road between them stands for systemd starting and supervising the
   containers the demo needs.
 
@@ -242,8 +242,8 @@ three images reference it.
 | Image pull | Container pops up on the quay -> the tall tower crane swings to it, hooks it, lifts it over the wall, swings and sets it down under the unpacking gantry (positions from `layout.ts`: the mast stands so both ends lie on the jib circle, 120 degree swing) -> the unpacking gantry lifts the lid -> new layers hop out onto the shelves, cached layers flash "already here" -> lid back on -> the container hops into its place in the warehouse row and from then on is the image (clickable, arc anchor). The crane and each drop-off spot hold one container at a time, so overlapping pulls queue |
 | Image build | Containerfile board rises in R&D -> base image crates flash (FROM) -> one crate per COPY/RUN pops out of the lab onto the bench -> crates packed into a container in the R&D yard -> the R&D crane lifts it to the unpacking gantry -> lid off -> crates shelved -> lid on, container joins the warehouse row -> FROM arc drawn from the base image's container |
 | Quadlet + daemon-reload | Unit file board rises in the Quadlet Department, arc from its image -> a copy travels the road and service gate to the systemd tower -> green `web.service` plate appears on the tower's city-facing wall, arc from the quadlet |
-| Container create (env) | The deploy truck, loaded with the image copy, detours to the Demo Shopping Center: one card per env var hops onto the container roof -> truck drives up the corridor between warehouse and factories to the plot -> copy unloaded, cards hop to the door queue; on start they are pinned to the front wall. Without a truck (tests) cards fly straight to the door |
-| Container create | A copy of the image's container hops out of the warehouse row (the original stays) onto the deploy truck at its bay -> (with env vars: via the Demo Shopping Center for the cards) -> the truck drives along the lane south of the plot row (rounded-corner routes from `layout.ts` that never cut through buildings) -> the copy is unloaded onto the plot -> the factory rises around it while the truck turns and drives back to the bay (one truck: deliveries queue) (the copy stays inside as the rootfs) -> image arc drawn. Planned: crew walks from warehouse with blueprint -> foundation + fences rise -> crates carried in and **unboxed**: lids pop, contents settle as stacked translucent layers -> glass upper floor slides on top -> watchman hut appears |
+| Container create (env) | The deploy truck, loaded with the image copy, detours to the Environmental Shopping Center: one card per env var hops onto the container roof -> truck drives up the corridor between warehouse and factories to the plot -> copy unloaded, cards hop to the door queue; on start they are pinned to the front wall. Without a truck (tests) cards fly straight to the door |
+| Container create | A copy of the image's container hops out of the warehouse row (the original stays) onto the deploy truck at its bay -> (with env vars: via the Environmental Shopping Center for the cards) -> the truck drives along the lane south of the plot row (rounded-corner routes from `layout.ts` that never cut through buildings) -> the copy is unloaded onto the plot -> the factory rises around it while the truck turns and drives back to the bay (one truck: deliveries queue) (the copy stays inside as the rootfs) -> image arc drawn. Planned: crew walks from warehouse with blueprint -> foundation + fences rise -> crates carried in and **unboxed**: lids pop, contents settle as stacked translucent layers -> glass upper floor slides on top -> watchman hut appears |
 | Container start | Lights on floor by floor, smokestack starts, meters come alive, driveway opens to the road |
 | Network traffic (ambient) | While two or more containers on a network are running, small white crates shuttle both ways between each pair (feeder -> belt -> feeder, two lanes). Position is a pure function of the sim clock: pauses with it, needs no state on replay, stops when either side stops |
 | Network request | A packet rides from the sender's feeder along the network belt to the receiver's feeder (caption e.g. `psql -> db:5432`), the receiver flashes, and the packet rides back |
@@ -294,7 +294,7 @@ Planned, not yet implemented. Do not start these until confirmed.
 
 - [x] Clickable objects with a brief name + type tooltip ("more" / inspector pending)
 - [x] Thin arc connections: image -> container, container -> volume, image -> layers on select
-- [x] Rename City Hall to **Demo Shopping Center**, move it next to the city
+- [x] Rename City Hall to **Environmental Shopping Center** (was Demo Shopping Center), move it next to the city
       wall, and add a **systemd Business Center** connected to it by road
 - [x] Environment variables as customer feedback cards processed in the
       factory district

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { CSS2DObject } from 'three/examples/jsm/renderers/CSS2DRenderer.js';
 import type { EventBus } from '../sim/bus';
-import type { EventOf, Mount } from '../sim/events';
+import type { EnvVar, EventOf, Mount } from '../sim/events';
 import type { Tweener } from '../engine/tween';
 import { ease } from '../engine/tween';
 import { HOIST_REST, TRUCK_BED, addRoad } from '../world/city';
@@ -18,8 +18,11 @@ import {
   craneYaw,
   deployRoute,
   districts,
-  shopRoute,
-  shopToPlotRoute,
+  bayToStopRoute,
+  secretStop,
+  shopStop,
+  stopToPlotRoute,
+  stopToStopRoute,
   truckBay,
   pullCranes,
   pullWaypoints,
@@ -72,6 +75,12 @@ interface Factory {
   networks: Set<string>; // networks it is hooked onto with a feeder
 }
 
+/** A truck stop on the way to a plot, and what is picked up there. */
+interface Pickup {
+  stop: { x: number; z: number };
+  take: () => THREE.Mesh[];
+}
+
 /** A network as a conveyor belt; slats move along it to show it carries traffic. */
 interface Belt {
   group: THREE.Group;
@@ -110,6 +119,7 @@ export class Director {
   private spotRelease = new Map<string, () => void>(); // image -> frees the unpacking spot once it is gone
   private belts = new Map<string, Belt>(); // network name -> conveyor
   private quadlets = new Map<string, THREE.Group>(); // quadlet file -> pinned board
+  private secrets = new Map<string, THREE.Mesh>(); // podman secret -> plaque at the Secret Facility
   private units = new Map<string, THREE.Mesh>(); // generated systemd unit -> plate on the tower
   private trafficPaths = new Map<string, ReturnType<typeof pathSampler>>(); // `net|a|b` -> feeder-belt-feeder path
   private builds = new Map<string, { base: string; crates: THREE.Mesh[] }>(); // image being built in R&D
@@ -139,6 +149,7 @@ export class Director {
     bus.on('systemd.daemon-reload', (e) => {
       for (const g of e.generated) this.enqueue(`quadlet:${g.quadlet}`, () => this.generateUnit(g.quadlet, g.unit));
     });
+    bus.on('secret.create', (e) => this.enqueue(`secret:${e.name}`, () => this.storeSecret(e)));
     bus.on('volume.create', (e) => this.enqueue(`volume:${e.name}`, () => this.buildLocker(e)));
     bus.on('volume.remove', (e) => this.enqueue(`volume:${e.name}`, () => this.removeLocker(e.name)));
     bus.on('container.create', (e) => {
@@ -179,7 +190,7 @@ export class Director {
     this.scene.add(this.root);
     this.arcs = new ArcLayer(this.root, this.tw);
     this.layerArcs = new ArcLayer(this.root, this.tw);
-    for (const m of [this.names, this.plots, this.factories, this.manifests, this.imageSlots, this.imageStored, this.imageLayers, this.crates, this.lockers, this.hostPaths, this.cargo, this.locks, this.spotRelease, this.belts, this.builds, this.quadlets, this.units, this.trafficPaths])
+    for (const m of [this.names, this.plots, this.factories, this.manifests, this.imageSlots, this.imageStored, this.imageLayers, this.crates, this.lockers, this.hostPaths, this.cargo, this.locks, this.spotRelease, this.belts, this.builds, this.quadlets, this.secrets, this.units, this.trafficPaths])
       m.clear();
     this.selectedImage = null;
     this.crateCount = 0;
@@ -829,8 +840,8 @@ export class Director {
     };
     this.factories.set(e.id, factory);
     // A copy of the image's container (the warehouse keeps the original) is trucked to the plot
-    // and unloaded there; the factory rises around it. With env vars, the truck first collects
-    // their feedback cards at the Demo Shopping Center.
+    // and unloaded there; the factory rises around it. On the way the truck collects plain env
+    // cards at the Environmental Shopping Center and sealed secret documents at the Secret Facility.
     const image = this.manifests.get(e.image);
     if (image) {
       const copy = this.makeShell(e.image);
@@ -838,7 +849,12 @@ export class Director {
       copy.position.copy(image.position);
       copy.rotation.copy(image.rotation);
       this.root.add(copy);
-      await this.truckToPlot(copy, factory, e.env.length ? () => this.makeCards(e, factory) : undefined);
+      const plain = e.env.filter((v) => !v.secretName);
+      const sealed = e.env.filter((v) => v.secretName);
+      const pickups: Pickup[] = [];
+      if (plain.length) pickups.push({ stop: shopStop(), take: () => this.makeCards(e, factory, plain) });
+      if (sealed.length) pickups.push({ stop: secretStop(), take: () => this.makeCards(e, factory, sealed) });
+      await this.truckToPlot(copy, factory, pickups);
       group.attach(copy);
     }
     await this.rise(body, FACTORY_SIZE, 0);
@@ -856,7 +872,7 @@ export class Director {
    * The deploy truck loads `copy` at its bay, drives to the plot, unloads it
    * onto the plot and heads back. One truck: deliveries queue for it.
    */
-  private async truckToPlot(copy: THREE.Group, factory: Factory, pickup?: () => THREE.Mesh[]): Promise<void> {
+  private async truckToPlot(copy: THREE.Group, factory: Factory, pickups: Pickup[] = []): Promise<void> {
     const slot = factory.slot;
     const onPlot = new THREE.Vector3(slot.x, 0.3 + CARGO.h / 2, slot.z);
     const truck = this.scene.getObjectByName('truck:deploy');
@@ -875,20 +891,28 @@ export class Director {
     copy.position.copy(bed);
     copy.rotation.set(0, 0, 0);
 
-    let cards: THREE.Mesh[] = [];
-    if (pickup) {
-      // Detour via the Demo Shopping Center: env cards hop onto the container roof.
-      await this.ride(truck, shopRoute(), 3);
-      cards = pickup();
+    // Pickup tour: each stop's cards/documents hop onto the container roof.
+    const cards: THREE.Mesh[] = [];
+    let at: { x: number; z: number } | undefined;
+    for (const p of pickups) {
+      const leg = at ? stopToStopRoute(at, p.stop) : bayToStopRoute(p.stop);
+      if (at) await this.turnTo(truck, pathSampler(leg).at(0).yaw, 0.5);
+      await this.ride(truck, leg, at ? 2 : 3);
+      const got = p.take();
       await Promise.all(
-        cards.map(async (card, i) => {
+        got.map(async (card, j) => {
+          const i = cards.length + j;
           const onRoof = new THREE.Vector3(TRUCK_BED.x - 2.2 + (i % 4) * 1.5, TRUCK_BED.top + CARGO.h + 0.1 + Math.floor(i / 4) * 0.2, 0);
-          await this.hop(card, card.position.clone(), truck.localToWorld(onRoof.clone()), 0.8, 4, i * 0.15);
+          await this.hop(card, card.position.clone(), truck.localToWorld(onRoof.clone()), 0.8, 4, j * 0.15);
           truck.attach(card);
           card.rotation.set(0, 0, 0);
         }),
       );
-      const onward = shopToPlotRoute(slot);
+      cards.push(...got);
+      at = p.stop;
+    }
+    if (at) {
+      const onward = stopToPlotRoute(at, slot);
       await this.turnTo(truck, pathSampler(onward).at(0).yaw, 0.5);
       await this.ride(truck, onward, 3.5);
     } else {
@@ -955,19 +979,41 @@ export class Director {
     return boards;
   }
 
-  /** Env vars arrive from the Demo Shopping Center as feedback cards and queue at the door. */
-  /** One feedback card per env var, waiting at the Demo Shopping Center. */
-  private makeCards(e: EventOf<'container.create'>, factory: Factory): THREE.Mesh[] {
-    const sc = districts.shoppingCenter;
-    return e.env.map((env) => {
+  /**
+   * One card per env var: plain feedback cards wait at the Environmental
+   * Shopping Center, gold sealed documents for secret-backed vars at the
+   * Secret Facility's door. Only names are shown, never values.
+   */
+  private makeCards(e: EventOf<'container.create'>, factory: Factory, vars: EnvVar[] = e.env): THREE.Mesh[] {
+    return vars.map((env) => {
+      const from = env.secretName ? districts.secrets : districts.shoppingCenter;
       const card = this.mesh(env.secret ? palette.secret : palette.card);
       card.scale.set(1.2, 0.15, 0.9);
-      card.position.set(sc.x, 4, sc.z);
-      tag(card, { key: keys.env(e.id, env.name), kind: env.secret ? 'secret' : 'env var', name: env.name });
+      card.position.set(from.x, 3, from.z + from.d / 2);
+      const name = env.secretName ? `${env.name} ← secret ${env.secretName}` : env.name;
+      tag(card, { key: keys.env(e.id, env.name), kind: env.secret ? 'secret' : 'env var', name });
       this.root.add(card);
       factory.cards.push(card);
       return card;
     });
+  }
+
+  /** `podman secret create`: a sealed plaque by the facility door, labelled with the name only. */
+  private async storeSecret(e: EventOf<'secret.create'>): Promise<void> {
+    const f = districts.secrets;
+    const n = this.secrets.size; // further secrets stack down the wall beside the door
+    const plaque = new THREE.Group();
+    plaque.position.set(f.x + 2, 2.2 - n, f.z + (f.d - 1.5) / 2 + 0.1);
+    const plate = this.mesh(palette.secret);
+    plate.scale.set(1.2, 0.8, 0.12);
+    const label = makeLabel(`🔒 ${e.name}`);
+    label.position.y = 1.2;
+    plaque.add(plate, label);
+    tag(plaque, { key: `secret:${e.name}`, kind: 'secret', name: `${e.name} · podman secret (contents never shown)` });
+    this.root.add(plaque);
+    this.secrets.set(e.name, plate);
+    await this.popIn(plaque);
+    await this.flash(plate);
   }
 
   /** Env cards not brought by the truck (no city, or no image to deploy) fly straight to the door queue. */

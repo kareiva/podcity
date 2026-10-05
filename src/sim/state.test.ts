@@ -148,4 +148,17 @@ describe('default steps', () => {
     sim.update(100 + 11.5);
     expect(sim.state.containers.get('metrics-1')!.status).toBe('running');
   });
+
+  it('creates the pgpass secret before db uses it as --secret for its password', () => {
+    const env = defaultSteps().find((s) => s.id === 'env')!.events.map((e) => e.event);
+    const secretAt = env.findIndex((e) => e.type === 'secret.create');
+    const createAt = env.findIndex((e) => e.type === 'container.create');
+    expect(secretAt).toBeGreaterThanOrEqual(0);
+    expect(secretAt).toBeLessThan(createAt);
+    const create = env[createAt] as Extract<(typeof env)[number], { type: 'container.create' }>;
+    expect(create.env.find((v) => v.name === 'POSTGRESQL_PASSWORD')).toMatchObject({ secret: true, secretName: 'pgpass' });
+    const sim = new Simulator(new EventBus(), defaultSteps());
+    sim.fastForward(defaultSteps().length);
+    expect([...sim.state.secrets]).toEqual(['pgpass']);
+  });
 });

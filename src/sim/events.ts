@@ -15,6 +15,7 @@ export interface EnvVar {
   name: string;
   value: string;
   secret?: boolean; // value must never be rendered
+  secretName?: string; // `--secret <name>,type=env,target=<env name>`: the value comes from a podman secret
 }
 
 export interface Port {
@@ -52,6 +53,7 @@ export type SimEvent =
   | { type: 'container.stop'; id: string }
   | { type: 'container.exit'; id: string; code: number; reason?: string }
   | { type: 'container.remove'; id: string }
+  | { type: 'secret.create'; name: string } // `podman secret create`; contents never leave the facility
   | { type: 'volume.create'; name: string }
   | { type: 'volume.remove'; name: string }
   | { type: 'network.create'; name: string; driver: 'bridge'; subnet: string }

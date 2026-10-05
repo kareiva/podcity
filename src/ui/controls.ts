@@ -1,7 +1,7 @@
 import type { SimClock } from '../engine/clock';
 import type { Player } from '../player';
 import type { EventBus } from '../sim/bus';
-import type { SimEvent } from '../sim/events';
+import type { EnvVar, SimEvent } from '../sim/events';
 
 const SPEEDS = [0.5, 1, 2, 4];
 
@@ -96,6 +96,11 @@ function button(text: string, onClick: () => void): HTMLButtonElement {
   return b;
 }
 
+/** `-e NAME`, or `--secret` for a value that comes from a podman secret. */
+function envFlag(v: EnvVar): string {
+  return v.secretName ? ` --secret ${v.secretName},type=env,target=${v.name}` : ` -e ${v.name}`;
+}
+
 function mountFlag(m: Extract<SimEvent, { type: 'container.create' }>['mounts'][number]): string {
   if (m.kind === 'tmpfs') return ` --tmpfs ${m.target}`;
   return ` -v ${m.source}:${m.target}${m.readOnly ? ':ro' : ''}`;
@@ -111,13 +116,14 @@ function describe(e: SimEvent): string {
     case 'image.build.layer': return `  ${e.instruction} --> ${e.layer}`;
     case 'image.build.done': return `  COMMIT ${e.image}`;
     case 'container.create':
-      if (e.restart) return `podman run -d --restart=${e.restart} --name ${e.name}${e.mounts.map(mountFlag).join('')}${e.env.map((v) => ` -e ${v.name}`).join('')} ${e.image.split('/').pop()}${e.command ? ` ${e.command}` : ''}`;
-      if (e.autoRemove) return `podman run --rm --name ${e.name}${e.mounts.map(mountFlag).join('')}${e.env.map((v) => ` -e ${v.name}`).join('')} ${e.image.split('/').pop()}${e.command ? ` ${e.command}` : ''}`;
-      return `podman create --name ${e.name}${e.mounts.map(mountFlag).join('')}${e.env.map((v) => ` -e ${v.name}`).join('')} ${e.image.split('/').pop()}`;
+      if (e.restart) return `podman run -d --restart=${e.restart} --name ${e.name}${e.mounts.map(mountFlag).join('')}${e.env.map(envFlag).join('')} ${e.image.split('/').pop()}${e.command ? ` ${e.command}` : ''}`;
+      if (e.autoRemove) return `podman run --rm --name ${e.name}${e.mounts.map(mountFlag).join('')}${e.env.map(envFlag).join('')} ${e.image.split('/').pop()}${e.command ? ` ${e.command}` : ''}`;
+      return `podman create --name ${e.name}${e.mounts.map(mountFlag).join('')}${e.env.map(envFlag).join('')} ${e.image.split('/').pop()}`;
     case 'container.start': return e.restart ? `  ${e.id} restarted (--restart=always)` : `podman start ${e.id}`;
     case 'container.stop': return `podman stop ${e.id}`;
     case 'container.exit': return `  ${e.id} exited (${e.code})${e.reason ? `: ${e.reason}` : ''}`;
     case 'container.remove': return `podman rm -f ${e.id}`;
+    case 'secret.create': return `podman secret create ${e.name} -   # value from stdin, never shown`;
     case 'volume.create': return `podman volume create ${e.name}`;
     case 'volume.remove': return `podman volume rm ${e.name}`;
     case 'network.create': return `podman network create --driver ${e.driver} --subnet ${e.subnet} ${e.name}`;

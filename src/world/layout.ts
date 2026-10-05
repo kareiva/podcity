@@ -18,7 +18,8 @@ export const districts = {
   factories: { x: 10, z: -10, w: 60, d: 40 },
   lockers: { x: 36, z: 30, w: 30, d: 16 }, // secured yard, fenced; next to the freight station
   businessCenter: { x: -48, z: 87, w: 12, d: 12 }, // systemd: host side, outside the wall, on the host highway's north roadside
-  shoppingCenter: { x: -34, z: 30, w: 14, d: 10 }, // demo entry point, next to the Quadlet department, clear of the port roads south
+  shoppingCenter: { x: -34, z: 30, w: 14, d: 10 },
+  secrets: { x: -8, z: 30, w: 7, d: 8 }, // Secret Facility: between the shopping center and the locker yard, in the gap between port-road columns // demo entry point, next to the Quadlet department, clear of the port roads south
   freight: { x: 65, z: 45, w: 20, d: 20 },
   hostLand: { x: 0, z: 100, w: 140, d: 12 }, // host filesystem: a highway beyond the wall
 } satisfies Record<string, Pad>;
@@ -187,7 +188,7 @@ export function unitPlateSlot(n: number): { x: number; y: number; z: number } {
   return { x: b.x, y: 14 - n * 2, z: b.z - 4.2 };
 }
 
-/** Road from the systemd Business Center north through a gate in the south wall, to the Demo Shopping Center's front. */
+/** Road from the systemd Business Center north through a gate in the south wall, to the Environmental Shopping Center's front. */
 export const serviceRoute: [number, number][] = [
   [-48, 81],
   [-48, 40],
@@ -255,15 +256,31 @@ export function deployRoute(factory: { x: number; z: number }): [number, number]
 /** North-south corridor between the warehouse hall and the factory district, used by the truck. */
 const TRUCK_CORRIDOR_X = -24;
 
-/** Where the truck stops in front of the Demo Shopping Center to pick up env cards. */
-export function shopStop(): { x: number; z: number } {
+/** East-west lane in front of the pickup stops (Environmental Shopping Center, Secret Facility). */
+export function pickupLaneZ(): number {
   const sc = districts.shoppingCenter;
-  return { x: sc.x, z: sc.z + sc.d / 2 + 4 };
+  return sc.z + sc.d / 2 + 4;
 }
 
-/** Bay -> Demo Shopping Center, down the corridor and round to its front. */
-export function shopRoute(): [number, number][] {
-  const stop = shopStop();
+/** Where the truck stops in front of the Environmental Shopping Center to pick up env cards. */
+export function shopStop(): { x: number; z: number } {
+  return { x: districts.shoppingCenter.x, z: pickupLaneZ() };
+}
+
+/** Where the truck stops in front of the Secret Facility to collect sealed secret documents. */
+export function secretStop(): { x: number; z: number } {
+  return { x: districts.secrets.x, z: pickupLaneZ() };
+}
+
+/** Road along the pickup lane, from the shopping center's front to the Secret Facility's door. */
+export const secretRoad: [number, number][] = [
+  [districts.shoppingCenter.x, pickupLaneZ() + 1],
+  [districts.secrets.x, pickupLaneZ() + 1],
+  [districts.secrets.x, districts.secrets.z + districts.secrets.d / 2],
+];
+
+/** Bay -> first pickup stop: down the corridor, then along the pickup lane. */
+export function bayToStopRoute(stop: { x: number; z: number }): [number, number][] {
   return roundedPath([
     [truckBay.x, truckBay.z],
     [TRUCK_CORRIDOR_X, truckBay.z + 6],
@@ -273,9 +290,16 @@ export function shopRoute(): [number, number][] {
   ]);
 }
 
-/** Demo Shopping Center -> back up the corridor -> along the lane to a factory plot. */
-export function shopToPlotRoute(factory: { x: number; z: number }): [number, number][] {
-  const stop = shopStop();
+/** One pickup stop to the next, straight along the pickup lane. */
+export function stopToStopRoute(from: { x: number; z: number }, to: { x: number; z: number }): [number, number][] {
+  return roundedPath([
+    [from.x, from.z],
+    [to.x, to.z],
+  ]);
+}
+
+/** Last pickup stop -> back to the corridor, up it, and along the plot row's lane to the plot. */
+export function stopToPlotRoute(stop: { x: number; z: number }, factory: { x: number; z: number }): [number, number][] {
   const lane = deployLaneZ(factory);
   return roundedPath([
     [stop.x, stop.z],

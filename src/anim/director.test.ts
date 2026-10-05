@@ -54,7 +54,7 @@ describe('Director fast-forward', () => {
     expect(k.get('host path')?.sort()).toEqual(['host:/home/user/migrations', 'host:/home/user/site']); // sheds outlive the one-off
     expect(k.get('scratch')).toHaveLength(1);
     expect(k.get('port')).toHaveLength(1);
-    expect(k.get('secret')).toHaveLength(1);
+    expect(k.get('secret')?.sort()).toEqual(['env:db-3:POSTGRESQL_PASSWORD', 'secret:pgpass']); // sealed card + the secret itself
     expect(k.get('env var')).toHaveLength(2);
     expect(k.get('layer')).toHaveLength(7); // ubi, nginx-124, postgresql-16 share UBI/s2i-core; podcity-web adds 2 on top of nginx
     expect(k.get('image')).toHaveLength(4);

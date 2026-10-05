@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CITY_RADIUS, serviceGate, roundedPath, shopRoute, shopStop, shopToPlotRoute, deployLaneZ, deployRoute, truckBay, FACTORY, ISO_20FT, buildCranes, buildWaypoints, pullCranes, pullWaypoints, unpackSpot, smoothPath, seaportLayout, hostPathSlot, quadletRoad, serviceRoute, labBenchSlot, SHELF_CAPACITY, districts, factorySlot, feederRoute, manifestSlot, networkBelt, shelfSlot, warehouseHall, type Pad } from './layout';
+import { CITY_RADIUS, serviceGate, roundedPath, bayToStopRoute, secretStop, shopStop, stopToPlotRoute, stopToStopRoute, deployLaneZ, deployRoute, truckBay, FACTORY, ISO_20FT, buildCranes, buildWaypoints, pullCranes, pullWaypoints, unpackSpot, smoothPath, seaportLayout, hostPathSlot, quadletRoad, serviceRoute, labBenchSlot, SHELF_CAPACITY, districts, factorySlot, feederRoute, manifestSlot, networkBelt, shelfSlot, warehouseHall, type Pad } from './layout';
 
 const OUTSIDE = new Set(['seaport', 'hostLand', 'freight', 'businessCenter']);
 
@@ -32,7 +32,7 @@ describe('city layout', () => {
     expect(gate.z).toBeLessThan(serviceRoute[0]![1]);
   });
 
-  it('places the Demo Shopping Center next to the Quadlet department, clear of the published-port roads', () => {
+  it('places the Environmental Shopping Center next to the Quadlet department, clear of the published-port roads', () => {
     const sc = districts.shoppingCenter;
     const q = districts.quadlet;
     expect(Math.hypot(sc.x - q.x, sc.z - q.z)).toBeLessThan(25);
@@ -169,16 +169,22 @@ describe('city layout', () => {
     }
   });
 
-  it('routes the truck via the Demo Shopping Center without driving through buildings', () => {
+  it('routes the truck via the Environmental Shopping Center without driving through buildings', () => {
     const half = 1.32; // truck half-width (ISO width + bed overhang)
     const blocked: Pad[] = [
       warehouseHall(),
       districts.shoppingCenter,
       districts.quadlet,
+      districts.secrets,
       ...Array.from({ length: 10 }, (_, n) => ({ ...factorySlot(n), w: FACTORY.w + 3, d: FACTORY.l })), // incl. scratch bins
     ];
     const inside = ([x, z]: [number, number], p: Pad) => Math.abs(x - p.x) < p.w / 2 + half && Math.abs(z - p.z) < p.d / 2 + half;
-    const routes = [shopRoute(), ...Array.from({ length: 5 }, (_, n) => shopToPlotRoute(factorySlot(n)))];
+    const routes = [
+      bayToStopRoute(shopStop()),
+      stopToStopRoute(shopStop(), secretStop()),
+      ...Array.from({ length: 5 }, (_, n) => stopToPlotRoute(secretStop(), factorySlot(n))),
+      ...Array.from({ length: 5 }, (_, n) => stopToPlotRoute(shopStop(), factorySlot(n))),
+    ];
     for (const route of routes)
       for (const p of route.slice(3, -3)) // ends sit at the bay/shop/plot fronts
         for (const b of blocked) expect(inside(p, b), `${p} in ${JSON.stringify(b)}`).toBe(false);
@@ -195,5 +201,19 @@ describe('city layout', () => {
       expect(x).toBeLessThanOrEqual(10 + 1e-9); // never past the corner
       expect(z).toBeGreaterThanOrEqual(-1e-9);
     }
+  });
+
+  it('puts the Secret Facility between the shopping center and the locker yard, clear of every port road', () => {
+    const f = districts.secrets;
+    expect(f.x).toBeGreaterThan(districts.shoppingCenter.x);
+    expect(f.x).toBeLessThan(districts.lockers.x);
+    const roadHalf = 2.5 / 2;
+    for (let n = 0; n < 5; n++) {
+      // Port roads run due south from each plot column's door.
+      expect(Math.abs(factorySlot(n).x - f.x), `column ${n}`).toBeGreaterThan(f.w / 2 + roadHalf);
+    }
+    expect(overlaps(f, districts.shoppingCenter)).toBe(false);
+    expect(overlaps(f, districts.lockers)).toBe(false);
+    expect(secretStop().z - (f.z + f.d / 2)).toBeGreaterThan(1.32); // the truck stops in front, not inside
   });
 });

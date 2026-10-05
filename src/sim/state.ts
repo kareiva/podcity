@@ -51,6 +51,7 @@ export interface PodmanState {
   containers: Map<string, ContainerState>;
   volumes: Set<string>;
   networks: Map<string, NetworkState>;
+  secrets: Set<string>; // names only: secret values are never modelled
   quadlets: Map<string, QuadletState>;
   pods: Map<string, PodState>;
 }
@@ -62,6 +63,7 @@ export function createState(): PodmanState {
     containers: new Map(),
     volumes: new Set(),
     networks: new Map(),
+    secrets: new Set(),
     quadlets: new Map(),
     pods: new Map(),
   };
@@ -145,6 +147,9 @@ export function applyEvent(state: PodmanState, e: SimEvent): void {
       state.containers.delete(e.id);
       break;
     }
+    case 'secret.create':
+      state.secrets.add(e.name);
+      break;
     case 'volume.create':
       state.volumes.add(e.name);
       break;
