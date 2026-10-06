@@ -528,6 +528,18 @@ export function bayToFreightRoute(bay: { x: number; z: number }): [number, numbe
   ]);
 }
 
+/** Width of each sidewalk along the host highway. */
+export const SIDEWALK = 2.5;
+
+/** Sidewalks along both sides of the host highway, as long as it and equally broad. */
+export function hostSidewalks(): { north: Pad; south: Pad } {
+  const h = districts.hostLand;
+  return {
+    north: { x: h.x, z: h.z - h.d / 2 - SIDEWALK / 2, w: h.w, d: SIDEWALK },
+    south: { x: h.x, z: h.z + h.d / 2 + SIDEWALK / 2, w: h.w, d: SIDEWALK },
+  };
+}
+
 /** Gate pillars are 1.4 m wide each side of the opening. */
 const GATE_PILLAR = 1.4;
 

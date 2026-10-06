@@ -21,6 +21,7 @@ import {
   LOCKER,
   spareLockerSlots,
   truckRoads,
+  hostSidewalks,
   parkingLot,
   freightLayout,
   TRAIN,
@@ -77,6 +78,7 @@ export function buildCity(scene: THREE.Scene): City {
   }
 
   addLaneMarkings(scene, districts.hostLand);
+  addSidewalks(scene);
   addRoad(scene, serviceRoute);
   addRoad(scene, quadletRoad);
   for (const r of truckRoads()) addRoad(scene, r.points, palette.road, r.width, 0.34); // port footbridges cross above them
@@ -525,6 +527,21 @@ function buildContainerShip(scene: THREE.Scene): { group: THREE.Group; restY: nu
 }
 
 /** White solid edge lines and dashed lane dividers along an east-west highway. */
+/** Concrete sidewalks either side of the host highway, each with a kerb along the road edge. */
+function addSidewalks(scene: THREE.Scene): void {
+  const { north, south } = hostSidewalks();
+  const slab = mat(0xc9c5bd);
+  const kerb = mat(0x9a958c);
+  for (const [pad, kerbZ] of [[north, north.z + north.d / 2 - 0.15], [south, south.z - south.d / 2 + 0.15]] as const) {
+    const walk = new THREE.Mesh(new THREE.BoxGeometry(pad.w, 0.32, pad.d), slab); // top just above the road and pads
+    walk.position.set(pad.x, 0.16, pad.z);
+    walk.receiveShadow = true;
+    const edge = new THREE.Mesh(new THREE.BoxGeometry(pad.w, 0.4, 0.3), kerb);
+    edge.position.set(pad.x, 0.2, kerbZ);
+    scene.add(walk, edge);
+  }
+}
+
 function addLaneMarkings(scene: THREE.Scene, pad: Pad): void {
   const m = new THREE.MeshBasicMaterial({ color: palette.marking });
   const y = 0.31;

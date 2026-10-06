@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CITY_WALL, insideWall, wallGates, bayToFreightRoute, freightToBayRoute, freightToLotRoute, freightLayout, TRAIN, parkingLot, parkingStalls, lotToBayRoute, extraTruckBays, FOOTBRIDGE, portBridge, visitorBridge, wallZ, containerfileStand, truckRoads, composeStand, spareLockerSlots, LOCKER, lockerSlot, quadletPavilionSlot, CITY_RADIUS, serviceGate, roundedPath, bayToStopRoute, secretStop, shopStop, stopToPlotRoute, stopToStopRoute, deployLaneZ, deployRoute, truckBay, FACTORY, ISO_20FT, buildCranes, buildWaypoints, pullCranes, pullWaypoints, unpackSpot, smoothPath, seaportLayout, hostPathSlot, quadletRoad, serviceRoute, labBenchSlot, SHELF_CAPACITY, districts, factorySlot, feederRoute, manifestSlot, networkBelt, shelfSlot, warehouseHall, type Pad } from './layout';
+import { hostSidewalks, CITY_WALL, insideWall, wallGates, bayToFreightRoute, freightToBayRoute, freightToLotRoute, freightLayout, TRAIN, parkingLot, parkingStalls, lotToBayRoute, extraTruckBays, FOOTBRIDGE, portBridge, visitorBridge, wallZ, containerfileStand, truckRoads, composeStand, spareLockerSlots, LOCKER, lockerSlot, quadletPavilionSlot, CITY_RADIUS, serviceGate, roundedPath, bayToStopRoute, secretStop, shopStop, stopToPlotRoute, stopToStopRoute, deployLaneZ, deployRoute, truckBay, FACTORY, ISO_20FT, buildCranes, buildWaypoints, pullCranes, pullWaypoints, unpackSpot, smoothPath, seaportLayout, hostPathSlot, quadletRoad, serviceRoute, labBenchSlot, SHELF_CAPACITY, districts, factorySlot, feederRoute, manifestSlot, networkBelt, shelfSlot, warehouseHall, type Pad } from './layout';
 
 const OUTSIDE = new Set(['seaport', 'hostLand', 'businessCenter']);
 
@@ -285,6 +285,16 @@ describe('city layout', () => {
     expect(wallGates().filter((g) => g.side === 'south').map((g) => g.at)).toEqual([serviceGate().x]);
     expect(FOOTBRIDGE.deck - 0.7).toBeGreaterThan(w.height + 0.2);
     expect(visitorBridge.landing).toBeGreaterThan(w.south + 2); // the bridge's stair comes down outside
+  });
+
+  it('lines the host highway with equally broad sidewalks on both sides', () => {
+    const h = districts.hostLand;
+    const { north, south } = hostSidewalks();
+    expect(north.z + north.d / 2).toBeCloseTo(h.z - h.d / 2); // against the road
+    expect(south.z - south.d / 2).toBeCloseTo(h.z + h.d / 2);
+    expect(north.d).toBe(south.d);
+    expect([north.w, south.w]).toEqual([h.w, h.w]);
+    expect(north.z - north.d / 2).toBeGreaterThan(CITY_WALL.south + CITY_WALL.thickness); // clear of the wall
   });
 
   it('puts the seaport terminal on the quay, clear of the container pick-up, and the ship on open water', () => {
