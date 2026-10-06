@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { tag } from './entity';
+import { makeFootbridge } from './footbridge';
 import { makeGate } from './gate';
 import { makeLabel } from './label';
 import {
@@ -15,6 +16,10 @@ import {
   truckBay,
   type CraneSpec,
   seaportLayout,
+  LOCKER,
+  spareLockerSlots,
+  truckRoads,
+  visitorBridge,
   districts, quadletOffice, quadletRoad, SYSTEMD_TOWER, rndLab, serviceGate, serviceRoute, warehouseHall, type DistrictId, type Pad } from './layout';
 import { palette } from './palette';
 
@@ -74,6 +79,7 @@ export function buildCity(scene: THREE.Scene): City {
   addLaneMarkings(scene, districts.hostLand);
   addRoad(scene, serviceRoute);
   addRoad(scene, quadletRoad);
+  for (const r of truckRoads()) addRoad(scene, r.points, palette.road, r.width, 0.34); // port footbridges cross above them
   // The service road enters the city through a gate in the south wall: systemd lives on the host.
   const gatePos = serviceGate();
   const gate = makeGate(4, false);
@@ -82,7 +88,9 @@ export function buildCity(scene: THREE.Scene): City {
 
   buildWarehouseHall(scene);
   buildFactoryHall(scene);
+  scene.add(makeFootbridge(visitorBridge)); // stands unconnected until a port is published on its plot
   buildLockerFence(scene);
+  buildSpareLockers(scene);
   buildRndLab(scene);
   buildQuadletOffice(scene);
   buildBusinessCenter(scene);
@@ -347,15 +355,19 @@ function addLaneMarkings(scene: THREE.Scene, pad: Pad): void {
   scene.add(dashes);
 }
 
-export function addRoad(parent: THREE.Object3D, points: [number, number][], color: number = palette.road, width = 4): THREE.Group {
+export function addRoad(parent: THREE.Object3D, points: [number, number][], color: number = palette.road, width = 4, y = 0.36): THREE.Group {
   const group = new THREE.Group();
   const m = mat(color);
   for (let i = 0; i < points.length - 1; i++) {
     const [ax, az] = points[i]!;
     const [bx, bz] = points[i + 1]!;
     const len = Math.hypot(bx - ax, bz - az);
-    const seg = new THREE.Mesh(new THREE.BoxGeometry(len, 0.1, width), m);
-    seg.position.set((ax + bx) / 2, 0.36, (az + bz) / 2);
+    // Reach half a width into each bend (not past the road's ends), so corners are filled.
+    const back = i > 0 ? width / 2 : 0;
+    const ahead = i < points.length - 2 ? width / 2 : 0;
+    const shift = (ahead - back) / 2 / len;
+    const seg = new THREE.Mesh(new THREE.BoxGeometry(len + back + ahead, 0.1, width), m);
+    seg.position.set((ax + bx) / 2 + (bx - ax) * shift, y, (az + bz) / 2 + (bz - az) * shift);
     seg.rotation.y = -Math.atan2(bz - az, bx - ax);
     seg.receiveShadow = true;
     group.add(seg);
@@ -464,6 +476,28 @@ function buildQuadletOffice(scene: THREE.Scene): void {
   office.traverse((o) => (o.castShadow = true));
   tag(office, { key: 'district:quadlet', kind: 'district', name: 'Quadlet Department · unit files' });
   scene.add(office);
+}
+
+/**
+ * Unused lockers: faint, see-through boxes in the storage color filling the
+ * yard. Not pickable; a volume's solid locker rises over its spare one
+ * (the spare is slightly smaller, so it disappears inside).
+ */
+function buildSpareLockers(scene: THREE.Scene): void {
+  const size = new THREE.BoxGeometry(LOCKER.w * 0.96, LOCKER.h * 0.96, LOCKER.d * 0.96);
+  const fill = new THREE.MeshStandardMaterial({ color: palette.storage, transparent: true, opacity: 0.12, depthWrite: false });
+  const edges = new THREE.EdgesGeometry(size);
+  const line = new THREE.LineBasicMaterial({ color: palette.storage, transparent: true, opacity: 0.45 });
+  for (const { x, z } of spareLockerSlots()) {
+    const box = new THREE.Mesh(size, fill);
+    const outline = new THREE.LineSegments(edges, line);
+    for (const o of [box, outline]) {
+      o.position.set(x, 0.3 + (LOCKER.h * 0.96) / 2, z);
+      o.renderOrder = 1; // after the opaque lockers in front of them
+      o.raycast = () => {};
+      scene.add(o);
+    }
+  }
 }
 
 /** Secured access: vertical bars all round the locker yard, with a gated entrance facing the factories. */

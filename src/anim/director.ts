@@ -4,9 +4,8 @@ import type { EventBus } from '../sim/bus';
 import type { EnvVar, EventOf, Mount } from '../sim/events';
 import type { Tweener } from '../engine/tween';
 import { ease } from '../engine/tween';
-import { HOIST_REST, TRUCK_BED, addRoad } from '../world/city';
+import { HOIST_REST, TRUCK_BED } from '../world/city';
 import { keys, tag, type EntityInfo } from '../world/entity';
-import { makeGate } from '../world/gate';
 import { makeLabel } from '../world/label';
 import {
   CRANE_HEIGHT,
@@ -34,6 +33,7 @@ import {
   hostPathSlot,
   labBenchSlot,
   lockerSlot,
+  LOCKER,
   manifestSlot,
   networkBelt,
   pathSampler,
@@ -42,18 +42,23 @@ import {
   quadletRoad,
   quadletPavilionSlot,
   composeStand,
+  containerfileStand,
   SYSTEMD_TOWER,
   systemdTowerHeight,
   rndLab,
   shelfSlot,
   unitPlateSlot,
   wallZ,
+  portBridge,
+  visitorBridge,
+  FOOTBRIDGE,
 } from '../world/layout';
+import { bridgeWalkway, makeBridgeLink, makeFootbridge } from '../world/footbridge';
 import { imageColor, palette } from '../world/palette';
 import { ArcLayer } from './arcs';
 
 const FACTORY_SIZE = new THREE.Vector3(FACTORY.w, FACTORY.h, FACTORY.l); // ISO 20ft proportions
-const LOCKER_SIZE = new THREE.Vector3(3.5, 4, 3.5);
+const LOCKER_SIZE = new THREE.Vector3(LOCKER.w, LOCKER.h, LOCKER.d);
 const OFFICE = { w: 5, h: 6, d: 5 }; // host path: small office building on the host highway
 const CARGO = ISO_20FT; // images travel as real-size 20ft shipping containers
 const HOIST_CARRY = 4; // hook length while a crane swings a container (clears the city wall)
@@ -61,7 +66,15 @@ const BELT_HEIGHT = 1.2;
 const BELT_WIDTH = 1.6;
 const SLAT_SPACING = 1.5;
 const BELT_SPEED = 1.2; // metres per simulation second
+/** The belt is two-sided, traffic keeps right: eastbound on the south half, westbound on the north half. */
+const BELT_LANE = BELT_WIDTH / 4; // offset of each half's centre from the belt's centre line
+/** Advertising stand: board bottom (above its catwalk), board height and width. */
+const BILLBOARD = { bottom: 3.6, h: 4.6, w: 8.4 };
+const PACKET_Y = 0.3 + BELT_HEIGHT + 0.4; // centre of a packet riding on the belt or a feeder
 const TRAFFIC_SPEED = 2.5; // ambient crates between running containers
+const VISITORS = 3; // visitors each way on a port's footbridge
+const VISITOR_SPEED = 1.4; // walking pace, m/s
+const VISITOR_COLORS = [0xef4444, 0x3b82f6, 0xfacc15, 0x22c55e, 0xa855f7, 0xf97316];
 const TRAFFIC_GAP = 7; // metres between crates in one direction
 const TRAFFIC_MAX = 96; // crates per network
 
@@ -78,6 +91,13 @@ interface Factory {
   baseLabel: string;
   running: boolean;
   networks: Set<string>; // networks it is hooked onto with a feeder
+  bridges: Footbridge[]; // visitor bridges of its published ports
+}
+
+/** A published port's visitor bridge: visitors walk its walkway (local points) while the factory runs. */
+interface Footbridge {
+  walkway: THREE.Vector3[];
+  visitors: THREE.InstancedMesh;
 }
 
 /** An image being built in R&D: its final base, the crates committed on the bench, and the base's copy once fetched. */
@@ -302,17 +322,46 @@ export class Director {
     return this.busy === 0;
   }
 
-  /** Per-frame ambient motion that is not part of any choreography: belt slats. */
+  /** Per-frame ambient motion that is not part of any choreography: belt slats, east on the south half, west on the north. */
   update(now: number): void {
     const m = new THREE.Matrix4();
     for (const belt of this.belts.values()) {
       const offset = (now * BELT_SPEED) % SLAT_SPACING;
-      for (let i = 0; i < belt.slats.count; i++) {
-        belt.slats.setMatrixAt(i, m.makeTranslation(-belt.length / 2 + offset + i * SLAT_SPACING, BELT_HEIGHT + 0.08, 0));
+      const perLane = belt.slats.count / 2;
+      for (let i = 0; i < perLane; i++) {
+        belt.slats.setMatrixAt(i, m.makeTranslation(-belt.length / 2 + offset + i * SLAT_SPACING, BELT_HEIGHT + 0.08, BELT_LANE));
+        belt.slats.setMatrixAt(perLane + i, m.makeTranslation(belt.length / 2 - offset - i * SLAT_SPACING, BELT_HEIGHT + 0.08, -BELT_LANE));
       }
       belt.slats.instanceMatrix.needsUpdate = true;
     }
     this.updateTraffic(now);
+    this.updateVisitors(now);
+  }
+
+  /**
+   * Visitors walking a running factory's port footbridges, to the factory and back, each keeping to the right.
+   * Like the network traffic, positions are a pure function of time.
+   */
+  private updateVisitors(now: number): void {
+    const m = new THREE.Matrix4();
+    for (const f of this.factories.values())
+      for (const b of f.bridges) {
+        b.visitors.count = f.running ? VISITORS * 2 : 0;
+        if (!f.running) continue;
+        const [a, top, foot] = b.walkway as [THREE.Vector3, THREE.Vector3, THREE.Vector3];
+        const flat = a.distanceTo(top);
+        const total = flat + top.distanceTo(foot);
+        for (let i = 0; i < VISITORS * 2; i++) {
+          const inbound = i < VISITORS; // from the road to the factory
+          const s = (now * VISITOR_SPEED + ((i % VISITORS) * total) / VISITORS + (inbound ? 0 : total / (VISITORS * 2))) % total;
+          const d = inbound ? total - s : s; // distance from the kiosk door
+          const p = d < flat ? a.clone().lerp(top, d / flat) : top.clone().lerp(foot, (d - flat) / (total - flat));
+          // Keep right: walking south (out) is the -x side, walking north (in) the +x side.
+          m.makeTranslation(p.x + (inbound ? 0.5 : -0.5), p.y + 0.55, p.z);
+          b.visitors.setMatrixAt(i, m);
+        }
+        b.visitors.instanceMatrix.needsUpdate = true;
+      }
   }
 
   /**
@@ -326,7 +375,6 @@ export class Director {
     const pos = new THREE.Vector3();
     const one = new THREE.Vector3(1, 1, 1);
     const up = new THREE.Vector3(0, 1, 0);
-    const y = 0.3 + BELT_HEIGHT + 0.3;
     for (const [network, belt] of this.belts) {
       const members = [...this.factories.entries()].filter(([, f]) => f.running && f.networks.has(network));
       let n = 0;
@@ -336,11 +384,12 @@ export class Director {
           const per = Math.max(1, Math.floor(sampler.length / TRAFFIC_GAP));
           for (let k = 0; k < per; k++) {
             const d = (now * TRAFFIC_SPEED + (k * sampler.length) / per) % sampler.length;
-            for (const [dist, lane] of [[d, 0.45], [sampler.length - d, -0.45]] as const) {
+            // Each direction keeps to its right-hand half: +lane is right of the path's own heading,
+            // -lane is right of the way back.
+            for (const [dist, lane] of [[d, BELT_LANE], [sampler.length - d, -BELT_LANE]] as const) {
               if (n >= TRAFFIC_MAX) break;
               const p = sampler.at(dist);
-              // Two lanes side by side: requests on one, replies on the other.
-              pos.set(p.x + Math.sin(p.yaw) * lane, y, p.z + Math.cos(p.yaw) * lane);
+              pos.set(p.x + Math.sin(p.yaw) * lane, PACKET_Y - 0.1, p.z + Math.cos(p.yaw) * lane);
               belt.traffic.setMatrixAt(n++, m.compose(pos, q.setFromAxisAngle(up, p.yaw), one));
             }
           }
@@ -356,12 +405,17 @@ export class Director {
     return this.belts.get(network)?.traffic.count ?? 0;
   }
 
+  /** Feeder of `a` -> along the belt's centre line -> feeder of `b`; riders keep to a lane either side of it. */
+  private beltPath(belt: Belt, a: Factory, b: Factory): [number, number][] {
+    const centre = { z: belt.group.position.z };
+    return [...feederRoute(a.slot, centre), ...[...feederRoute(b.slot, centre)].reverse()];
+  }
+
   private trafficPath(network: string, belt: Belt, [a, fa]: [string, Factory], [b, fb]: [string, Factory]) {
     const key = `${network}|${a}|${b}`;
     let sampler = this.trafficPaths.get(key);
     if (!sampler) {
-      const beltZ = { z: belt.group.position.z + BELT_WIDTH / 2 };
-      sampler = pathSampler([...feederRoute(fa.slot, beltZ), ...[...feederRoute(fb.slot, beltZ)].reverse()]);
+      sampler = pathSampler(this.beltPath(belt, fa, fb));
       this.trafficPaths.set(key, sampler);
     }
     return sampler;
@@ -611,12 +665,18 @@ export class Director {
     this.builds.set(e.image, build);
     const old = this.containerfiles.get(e.image); // a rebuild replaces the previous Containerfile
     if (old) await this.vanish(old);
-    const sheet = await this.pinDocument(rndLab().board, e.containerfile, {
-      key: keys.build(e.image),
-      kind: 'containerfile',
-      name: `Containerfile · ${shortRef(e.image)}`,
-    });
-    this.containerfiles.set(e.image, sheet);
+    // The Containerfile is an advertising stand on the host roadside beside the host offices, wired to the R&D
+    // Department that builds from it: one tile per instruction, the text itself only on click.
+    const instructions = e.containerfile.filter((l) => /^[A-Z]+\s/.test(l)).length;
+    const stand = this.makeBillboard(containerfileStand, instructions, `Containerfile · ${shortRef(e.image)}`);
+    tag(stand, { key: keys.build(e.image), kind: 'containerfile', name: `Containerfile · ${shortRef(e.image)}`, detail: e.containerfile.join('\n') });
+    this.containerfiles.set(e.image, stand);
+    await this.popIn(stand);
+    const { building } = rndLab();
+    await Promise.all([
+      this.flashBlueprint(stand),
+      this.arcs.connect(keys.build(e.image), 'district:rnd', stand.position.clone().setY(BILLBOARD.bottom + BILLBOARD.h), new THREE.Vector3(building.x, 6, building.z), palette.blueprint),
+    ]);
 
     await this.whenImage(e.base);
     const reused = (this.imageLayers.get(e.base) ?? []).flatMap((l) => this.crates.get(l) ?? []);
@@ -688,8 +748,11 @@ export class Director {
       return;
     }
     const source = e.from ? this.stages.get(stageKey(e.image, e.from)) : undefined;
+    // Final-stage layers land on the base copy: wait for it to reach the yard before the crate exists.
+    const based = !source && build.stagesLeft <= 0 && build.baseCopy ? await build.baseCopy : undefined;
     const slot = labBenchSlot(build.crates.length);
     const crate = this.mesh(imageColor(e.image));
+    crate.position.copy(fromLab); // never seen at the origin before its hop starts
     crate.scale.setScalar(2.4);
     crate.userData.layer = e.layer;
     tag(crate, { key: keys.layer(e.layer), kind: 'layer', name: `${e.layer} · ${shortRef(e.image)} · ${e.instruction}` });
@@ -708,7 +771,6 @@ export class Director {
       await this.tw.tween({ duration: 0.3, update: (k) => crate.scale.setScalar(0.8 + 1.6 * k) });
       return;
     }
-    const based = build.stagesLeft <= 0 && build.baseCopy ? await build.baseCopy : undefined;
     if (based) {
       await this.stackOnBase(based.cargo, crate, build.crates.length - 1, fromLab);
       return;
@@ -1115,40 +1177,68 @@ export class Director {
 
   // --- Compose: the whole stack on one blueprint ----------------------------
 
-  /** `podman compose up`: a blueprint stand rises by the service road, one white box per service on its board. */
+  /** `podman compose up`: an advertising stand (billboard) for the stack rises beside the systemd Business Center. */
   private async raiseBlueprint(e: EventOf<'compose.up'>): Promise<void> {
-    const stand = new THREE.Group();
-    stand.position.set(composeStand.x, 0.3, composeStand.z);
-    for (const dz of [-3, 3]) {
-      const leg = this.mesh(palette.bars);
-      leg.scale.set(0.3, 4.6, 0.3);
-      leg.position.set(0.5, 2.3, dz);
-      stand.add(leg);
-    }
-    // The board leans back (east), its drawing facing the road to the west.
-    const board = new THREE.Group();
-    board.position.set(0, 4.4, 0);
-    board.rotation.z = -0.35;
-    const sheet = this.mesh(palette.blueprint);
-    sheet.name = 'blueprint';
-    sheet.scale.set(0.18, 4.4, 7.4);
-    board.add(sheet);
-    e.services.forEach((_, i) => {
-      const box = this.mesh(palette.card);
-      box.scale.set(0.06, 1.1, 2.2);
-      box.position.set(-0.12, i < 2 ? 1 : -1, (i % 2 ? 1 : -1) * 1.7);
-      board.add(box);
-    });
-    stand.add(board);
-    const label = makeLabel(`${e.path.split('/').pop()} · ${e.project}`);
-    label.position.y = 8;
-    stand.add(label);
-    stand.traverse((o) => (o.castShadow = true));
+    const stand = this.makeBillboard(composeStand, e.services.length, `${e.path.split('/').pop()} · ${e.project}`);
     tag(stand, { key: keys.compose(e.project), kind: 'compose', name: `${e.path} · ${e.services.length} services`, detail: e.lines.join('\n') });
-    this.root.add(stand);
     this.composeStands.set(e.project, stand);
     await this.popIn(stand);
     await this.flashBlueprint(stand);
+  }
+
+  /**
+   * Advertising stand (billboard) at `at`, turned by `at.yaw` (built facing local -x). Its blue face only
+   * advertises: one white tile per item; what it stands for is shown on click, in the tooltip.
+   */
+  private makeBillboard(at: { x: number; z: number; yaw: number }, tiles: number, text: string): THREE.Group {
+    const { bottom: BOTTOM, h: H, w: W } = BILLBOARD;
+    const stand = new THREE.Group();
+    stand.position.set(at.x, 0.3, at.z);
+    stand.rotation.y = at.yaw;
+    for (const dz of [-W / 2 + 1.2, W / 2 - 1.2]) {
+      const post = this.mesh(palette.bars);
+      post.scale.set(0.4, BOTTOM + H, 0.4);
+      post.position.set(0.45, (BOTTOM + H) / 2, dz);
+      stand.add(post);
+    }
+    const frame = this.mesh(palette.bars);
+    frame.scale.set(0.3, H + 0.3, W + 0.3);
+    frame.position.y = BOTTOM + H / 2;
+    const face = this.mesh(palette.blueprint);
+    face.name = 'blueprint'; // flashes when the stand is used
+    face.scale.set(0.04, H - 0.2, W - 0.2);
+    face.position.set(-0.17, BOTTOM + H / 2, 0);
+    const catwalk = this.mesh(palette.bars);
+    catwalk.scale.set(1.1, 0.12, W);
+    catwalk.position.set(-0.5, BOTTOM - 0.2, 0);
+    stand.add(frame, face, catwalk);
+    // White tiles in up to two rows, like a poster.
+    const rows = tiles > 2 ? 2 : 1;
+    const cols = Math.max(1, Math.ceil(tiles / rows));
+    for (let i = 0; i < tiles; i++) {
+      const tile = this.mesh(palette.card);
+      tile.scale.set(0.04, (H - 1.2) / rows - 0.4, (W - 1.6) / cols - 0.5);
+      const r = Math.floor(i / cols);
+      const c = i % cols;
+      tile.position.set(-0.2, BOTTOM + H - 0.6 - ((r + 0.5) * (H - 1.2)) / rows, -W / 2 + 0.8 + ((c + 0.5) * (W - 1.6)) / cols);
+      stand.add(tile);
+    }
+    // Floodlights on arms over the top edge, shining down on the face.
+    for (const dz of [-W / 3, 0, W / 3]) {
+      const arm = this.mesh(palette.bars);
+      arm.scale.set(1, 0.08, 0.08);
+      arm.position.set(-0.5, BOTTOM + H + 0.35, dz);
+      const lamp = new THREE.Mesh(this.box, new THREE.MeshStandardMaterial({ color: 0xfff3c4, emissive: 0xffd36b, emissiveIntensity: 0.8 }));
+      lamp.scale.set(0.35, 0.2, 0.5);
+      lamp.position.set(-1, BOTTOM + H + 0.3, dz);
+      stand.add(arm, lamp);
+    }
+    const label = makeLabel(text);
+    label.position.y = BOTTOM + H + 1.6;
+    stand.add(label);
+    stand.traverse((o) => (o.castShadow = true));
+    this.root.add(stand);
+    return stand;
   }
 
   private async flashBlueprint(stand: THREE.Object3D): Promise<void> {
@@ -1296,6 +1386,7 @@ export class Director {
       slot,
       cards: [],
       extras: [],
+      bridges: [],
       oneOff: !!e.autoRemove,
       restartAlways: e.restart === 'always',
       restarts: 0,
@@ -1334,7 +1425,7 @@ export class Director {
     const stand = e.compose ? this.composeStands.get(e.compose) : undefined;
     if (e.compose && stand) {
       links.push(this.flashBlueprint(stand));
-      links.push(this.arcs.connect(keys.compose(e.compose), keys.container(e.id), stand.position.clone().setY(7.5), roof, palette.blueprint));
+      links.push(this.arcs.connect(keys.compose(e.compose), keys.container(e.id), stand.position.clone().setY(BILLBOARD.bottom + BILLBOARD.h), roof, palette.blueprint));
     }
     await Promise.all(links);
   }
@@ -1637,19 +1728,18 @@ export class Director {
     const to = this.factories.get(e.to);
     const belt = this.belts.get(e.network);
     if (!from || !to || !belt) return;
-    const beltZ = { z: belt.group.position.z + BELT_WIDTH / 2 };
-    const path: [number, number][] = [...feederRoute(from.slot, beltZ), ...[...feederRoute(to.slot, beltZ)].reverse()];
+    const path = this.beltPath(belt, from, to);
     const packet = this.mesh(palette.network);
     packet.scale.setScalar(0.8);
-    packet.position.y = BELT_HEIGHT + 0.5;
+    packet.position.y = PACKET_Y;
     const label = makeLabel(e.label);
     label.position.y = 2.5; // packet is scaled 0.8, so this sits ~2 above it
     packet.add(label);
     this.root.add(packet);
-    await this.ride(packet, path, 3);
+    await this.ride(packet, path, 3, BELT_LANE); // request on the right-hand half...
     await this.flash(this.part(to, 'body')!);
     label.removeFromParent(); // the reply carries no caption
-    await this.ride(packet, [...path].reverse(), 2.5);
+    await this.ride(packet, [...path].reverse(), 2.5, BELT_LANE); // ...and the reply on the other half, right of its way back
     await this.vanish(packet);
   }
 
@@ -1697,12 +1787,16 @@ export class Director {
       roller.position.set((end * lane.length) / 2, BELT_HEIGHT / 2, 0);
       group.add(roller);
     }
+    // Two-sided: one run of slats per half (see update), with a rail down the middle between them.
     const slats = new THREE.InstancedMesh(
-      new THREE.BoxGeometry(0.35, 0.06, BELT_WIDTH - 0.1),
+      new THREE.BoxGeometry(0.35, 0.06, BELT_WIDTH / 2 - 0.15),
       new THREE.MeshStandardMaterial({ color: palette.network, flatShading: true }),
-      Math.floor(lane.length / SLAT_SPACING),
+      2 * Math.floor(lane.length / SLAT_SPACING),
     );
-    group.add(slats);
+    const divider = this.mesh(palette.bars);
+    divider.scale.set(lane.length, 0.12, 0.08);
+    divider.position.y = BELT_HEIGHT + 0.06;
+    group.add(slats, divider);
     const label = makeLabel(`${e.name} · ${e.subnet}`);
     label.position.set(lane.length / 2 - 6, 3, 0); // east end, clear of factory labels
     group.add(label);
@@ -1767,30 +1861,44 @@ export class Director {
 
   // --- Network: exposing to the host ----------------------------------------
 
-  /** Published ports: a road from the factory door through a wall gate to the host land. */
+  /**
+   * Published ports: the city's visitor bridge, which ends at its last pier outside the Factory District hall,
+   * extends into the hall to the factory. A stair kiosk rises on the factory roof and the deck slides north from the
+   * bridge's end to its door; the port label
+   * goes up on the bridge's gate in the wall. Visitors walk it while the container runs. A port on any other plot
+   * first gets a bridge of its own.
+   */
   private async expose(e: EventOf<'network.connect'>): Promise<void> {
     const f = this.factories.get(e.container);
     if (!f) return;
-    const hostEdge = districts.hostLand.z - districts.hostLand.d / 2;
     await Promise.all(
       e.ports.map(async (p, i) => {
-        const x = f.slot.x + i * 3;
-        const z0 = f.slot.z + FACTORY_SIZE.z / 2;
-        const road = addRoad(this.root, [[x, z0], [x, hostEdge]], palette.network, 2.5);
-        const gate = makeGate(2.5, false, palette.network);
-        gate.position.set(x, 0, wallZ(x));
-        const label = makeLabel(`${p.host} → ${p.container}/${p.protocol}`);
-        label.position.set(0, 6.5, 0);
-        gate.add(label);
-        tag(gate, { key: `port:${e.container}:${p.host}`, kind: 'port', name: `${p.host} → ${p.container}/${p.protocol}` });
-        this.root.add(gate);
-        f.extras.push(road, gate);
+        const at = portBridge(f.slot, i);
+        const port = `${p.host} → ${p.container}/${p.protocol}`;
+        if (at.x !== visitorBridge.x || at.from !== visitorBridge.from) {
+          const own = makeFootbridge(at);
+          this.root.add(own);
+          f.extras.push(own);
+          await this.popIn(own);
+        }
+        const { group: link, kiosk, deck } = makeBridgeLink(at);
+        const visitors = new THREE.InstancedMesh(new THREE.CapsuleGeometry(0.22, 0.6, 2, 6), new THREE.MeshStandardMaterial({ flatShading: true }), VISITORS * 2);
+        for (let v = 0; v < VISITORS * 2; v++) visitors.setColorAt(v, new THREE.Color(VISITOR_COLORS[v % VISITOR_COLORS.length]!));
+        visitors.count = 0;
+        visitors.frustumCulled = false;
+        link.add(visitors);
+        const label = makeLabel(port);
+        label.position.set(0, FOOTBRIDGE.gate + 1.5, wallZ(at.x) - at.from);
+        link.add(label);
+        tag(link, { key: `port:${e.container}:${p.host}`, kind: 'port', name: `${port} · visitor bridge` });
+        this.root.add(link);
+        f.extras.push(link);
+        f.bridges.push({ walkway: bridgeWalkway(at), visitors });
 
-        // Pave from the factory outwards, then raise the gate.
-        road.position.z = z0;
-        road.children.forEach((c) => (c.position.z -= z0));
-        await this.tw.tween({ duration: 1.5, update: (k) => road.scale.set(1, 1, Math.max(k, 0.001)) });
-        await this.tw.tween({ duration: 0.6, ease: ease.outBack, update: (k) => gate.scale.set(1, Math.max(k, 0.01), 1) });
+        kiosk.scale.set(1, 0.01, 1);
+        deck.scale.set(1, 1, 0.001);
+        await this.tw.tween({ duration: 0.6, ease: ease.outBack, update: (k) => kiosk.scale.set(1, Math.max(k, 0.01), 1) });
+        await this.tw.tween({ duration: 2, ease: ease.inOutCubic, update: (k) => deck.scale.set(1, 1, Math.max(k, 0.001)) });
       }),
     );
   }
@@ -1849,15 +1957,16 @@ export class Director {
   }
 
   /** Move along a smooth path at constant speed, facing along it, like cargo on a belt. */
-  private async ride(obj: THREE.Object3D, path: [number, number][], duration = 4): Promise<void> {
+  /** Move along `path`; `lane` keeps that far to the right of the direction of travel. */
+  private async ride(obj: THREE.Object3D, path: [number, number][], duration = 4, lane = 0): Promise<void> {
     const sampler = pathSampler(path);
     await this.tw.tween({
       duration,
       ease: ease.linear,
       update: (k) => {
         const p = sampler.at(k * sampler.length);
-        obj.position.x = p.x;
-        obj.position.z = p.z;
+        obj.position.x = p.x + Math.sin(p.yaw) * lane;
+        obj.position.z = p.z + Math.cos(p.yaw) * lane;
         obj.rotation.y = p.yaw;
       },
     });

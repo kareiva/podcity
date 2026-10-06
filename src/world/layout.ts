@@ -18,7 +18,7 @@ export const districts = {
   factories: { x: 10, z: -10, w: 60, d: 40 },
   lockers: { x: 36, z: 30, w: 30, d: 16 }, // secured yard, fenced; next to the freight station
   businessCenter: { x: -48, z: 87, w: 12, d: 12 }, // systemd: host side, outside the wall, on the host highway's north roadside
-  shoppingCenter: { x: -34, z: 30, w: 14, d: 10 }, // demo entry point, next to the Quadlet department, clear of the port roads south
+  shoppingCenter: { x: -34, z: 30, w: 14, d: 10 }, // demo entry point, next to the Quadlet department, clear of the port bridges south
   secrets: { x: 10, z: -41, w: 7, d: 8 }, // Secret Facility: behind (north of) the factory hall, off the road network; door faces the hall
   freight: { x: 65, z: 45, w: 20, d: 20 },
   hostLand: { x: 0, z: 100, w: 140, d: 12 }, // host filesystem: a highway beyond the wall
@@ -182,8 +182,12 @@ export function quadletOffice(): { building: { x: number; z: number }; board: { 
   return { building: { x: q.x - 3, z: q.z - 1 }, board: { x: q.x + 5, z: q.z + 2 } };
 }
 
-/** Compose blueprint stand: inside the wall, just east of the service road coming in through the wall gate; faces the road (west). */
-export const composeStand = { x: -41, z: 52 };
+/**
+ * Compose blueprint stand: on the host highway's north roadside next to the systemd Business Center (west of it;
+ * the quadlet pavilions take the east side), its board facing the highway (south). `yaw` turns the stand, whose
+ * board is drawn facing west, round to face south.
+ */
+export const composeStand = { x: districts.businessCenter.x - districts.businessCenter.w / 2 - 7.5, z: districts.businessCenter.z + 1, yaw: Math.PI / 2 };
 
 /** Pavilion for the n-th deployed quadlet: a row on the host highway's north roadside, east of the systemd tower. */
 export function quadletPavilionSlot(n: number): { x: number; z: number } {
@@ -240,6 +244,39 @@ export const ISO_20FT = { l: 6.06, w: 2.44, h: 2.59 };
 const FACTORY_SCALE = 8 / ISO_20FT.l;
 export const FACTORY = { w: ISO_20FT.w * FACTORY_SCALE, h: ISO_20FT.h * FACTORY_SCALE, l: 8 };
 
+/**
+ * Pedestrian visitor bridge for a published port: deck height (clears the deploy trucks on the plot lanes), deck
+ * width, length of the stair down to the host highway, and height of the port gate it passes under in the wall.
+ */
+export const FOOTBRIDGE = { deck: FACTORY.h + 2, width: 2.2, stairs: 9, gate: 8.5 };
+
+/** Visitor bridge for a factory's i-th published port, running due south along z. */
+export interface PortBridge {
+  x: number;
+  from: number; // stair kiosk on the front of the factory roof
+  stub: number; // where the always-standing deck stops: its northernmost pier, outside the hall; a published port extends it to the kiosk
+  landing: number; // where the deck ends and the stair down begins
+  to: number; // foot of the stair, at the host highway's edge
+  piers: number[]; // z of each pier under the deck
+}
+
+/**
+ * Visitor bridge for a factory's i-th published port: from a stair kiosk on the front of its roof, due south over
+ * the plot lanes and the city wall (through the port gate), then a stair down to the host highway's edge. Piers
+ * stand only south of the Factory District, clear of the wall, so no truck lane or plot is blocked.
+ */
+export function portBridge(factory: { x: number; z: number }, i: number): PortBridge {
+  const x = factory.x + i * 3;
+  const to = districts.hostLand.z - districts.hostLand.d / 2;
+  const landing = to - FOOTBRIDGE.stairs;
+  const f = districts.factories;
+  const wall = wallZ(x);
+  const piers: number[] = [];
+  for (let z = f.z + f.d / 2 + 4; z < landing - 1; z += 8) if (Math.abs(z - wall) > 2) piers.push(z);
+  const front = factory.z + FACTORY.l / 2;
+  return { x, from: front - 1.2, stub: piers[0] ?? front + 2.5, landing, to, piers };
+}
+
 /** Position of the n-th factory plot in the factory district. */
 export function factorySlot(n: number): { x: number; z: number } {
   const f = districts.factories;
@@ -250,6 +287,13 @@ export function factorySlot(n: number): { x: number; z: number } {
     z: f.z - f.d / 2 + BELT_LANE + SLOT_SPACING / 2 + row * SLOT_SPACING,
   };
 }
+
+/**
+ * The city's visitor bridge: always standing, in the column of the first factory plot (where `web`, the container
+ * whose port is published, is built), its deck ending at its northernmost pier, outside the Factory District hall,
+ * until a port is published there and the extension runs into the hall to the factory.
+ */
+export const visitorBridge = portBridge(factorySlot(0), 0);
 
 /** Where the deploy truck parks and loads image containers: between the warehouse and the factory district. */
 export const truckBay = { x: -31, z: -12 };
@@ -310,6 +354,27 @@ export function bayToStopRoute(stop: { x: number; z: number }, bay: { x: number;
     [TRUCK_CORRIDOR_X, stop.z],
     [stop.x, stop.z],
   ]);
+}
+
+/**
+ * Roads under the deploy truck's routes (the routes above, straightened): the pickup lane in front of the
+ * Environmental Shopping Center, the corridor north between the warehouse and the factories, the strip
+ * behind the factory hall to the Secret Facility, the apron of the truck bays with its spur to the corridor,
+ * and the lane in front of the first row of plots. Published-port footbridges cross over them.
+ */
+export function truckRoads(): { points: [number, number][]; width: number }[] {
+  const shop = shopStop();
+  const secret = secretStop();
+  const bays = [truckBay, ...extraTruckBays];
+  const bayZ = bays.map((b) => b.z);
+  const lane = deployLaneZ(factorySlot(0));
+  const lastPlot = factorySlot(SLOT_COLS - 1);
+  return [
+    { points: [[shop.x, shop.z], [TRUCK_CORRIDOR_X, shop.z], [TRUCK_CORRIDOR_X, secret.z], [secret.x, secret.z]], width: 4 },
+    { points: [[truckBay.x, Math.min(...bayZ) - 1.5], [truckBay.x, Math.max(...bayZ) + 1.5]], width: 8 }, // bay apron, trucks park across it
+    { points: [[truckBay.x + 4, truckBay.z], [TRUCK_CORRIDOR_X, truckBay.z]], width: 4 },
+    { points: [[TRUCK_CORRIDOR_X, lane], [lastPlot.x, lane]], width: 3 }, // fits the gap in front of the plot row
+  ];
 }
 
 /** One pickup stop to the next: straight along a shared lane, otherwise via the corridor. */
@@ -382,6 +447,21 @@ export function lockerSlot(n: number): { x: number; z: number } {
   return { x: l.x - l.w / 2 + 3 + n * 5, z: l.z };
 }
 
+/** A storage locker (named volume). */
+export const LOCKER = { w: 3.5, h: 4, d: 3.5 };
+
+/** Lockers that fit in one row of the yard. */
+export const LOCKERS_PER_ROW = Math.floor((districts.lockers.w - 3 + LOCKER.w / 2) / 5) + 1;
+
+/**
+ * Empty lockers waiting for a volume: every slot of the volume row, plus a
+ * second row behind it (south, away from the gate). Volumes fill the first row.
+ */
+export function spareLockerSlots(): { x: number; z: number }[] {
+  const front = Array.from({ length: LOCKERS_PER_ROW }, (_, n) => lockerSlot(n));
+  return [...front, ...front.map(({ x, z }) => ({ x, z: z + 5 }))];
+}
+
 /** Where the n-th image (its shipping container, standing north-south) is kept along the warehouse front. */
 export function manifestSlot(n: number): { x: number; z: number } {
   const w = districts.warehouse;
@@ -395,14 +475,29 @@ export function doorQueueSlot(factory: { x: number; z: number }, n: number): { x
 
 export const HIGHWAY_LANES = 3;
 
+/** Gap between plot columns (east of systemd) the Containerfile stand takes, right of the first host offices. */
+const CONTAINERFILE_GAP = 2;
+
+/** x of the n-th gap between two factory plot columns, the first between columns 0 and 1. */
+function columnGapX(n: number): number {
+  const f = districts.factories;
+  return f.x - f.w / 2 + SLOT_SPACING + n * SLOT_SPACING;
+}
+
 /**
  * Plot for the n-th host path: an office on the near (north) roadside of the host highway, between the wall
  * and the road. East of the systemd Business Center and its quadlet pavilions, each in the gap between two
- * factory plot columns, so published-port roads (which run due south from a plot column) pass between them.
+ * factory plot columns, so published-port bridges (which run due south from a plot column) pass between them.
+ * The gap the Containerfile stand stands in is skipped.
  */
 export function hostPathSlot(n: number): { x: number; z: number } {
   const h = districts.hostLand;
-  const f = districts.factories;
-  const firstGap = f.x - f.w / 2 + SLOT_SPACING; // between plot columns 0 and 1
-  return { x: firstGap + n * SLOT_SPACING, z: h.z - h.d / 2 - 4 };
+  return { x: columnGapX(n < CONTAINERFILE_GAP ? n : n + 1), z: h.z - h.d / 2 - 4 };
 }
+
+/**
+ * Containerfile advertising stand: on the host highway's north roadside, right (east) of the first host-path
+ * offices in the next gap between plot columns, its board facing the highway (south) like the compose stand.
+ * Wired to R&D by an arc. Billboards are built facing west; `yaw` turns them.
+ */
+export const containerfileStand = { x: columnGapX(CONTAINERFILE_GAP), z: districts.hostLand.z - districts.hostLand.d / 2 - 6, yaw: Math.PI / 2 };

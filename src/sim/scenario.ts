@@ -223,7 +223,7 @@ export function defaultSteps(seed = 42): Step[] {
       at(0.3, { type: 'network.connect', container: 'db-2', network: NET, ports: [] });
     }),
 
-    step('expose', 'Expose', 'web is re-created with -p 8080:8080 (UBI nginx listens on 8080 as non-root); a road leads through a gate in the wall to the host.', (at) => {
+    step('expose', 'Expose', 'web is re-created with -p 8080:8080 (UBI nginx listens on 8080 as non-root); the visitor bridge, ending at its last pier outside the factory hall until now, extends into the hall and connects web to the host highway.', (at) => {
       at(0, { type: 'container.remove', id: 'web-1' });
       at(0.5, { type: 'container.create', id: 'web-2', name: 'web', image: NGINX, mounts: [], env: [] });
       at(2.5, { type: 'container.start', id: 'web-2' });
@@ -276,7 +276,7 @@ export function defaultSteps(seed = 42): Step[] {
       at(0.3, { type: 'network.connect', container: 'metrics-1', network: NET, ports: [] });
     }),
 
-    step('build', 'Containerfile', 'The R&D department writes a Containerfile FROM ubi:latest. The crane brings a copy of the UBI image over from the warehouse as the starting point: its layer is reused, not copied. RUN installs nginx and each COPY adds the site and its config, one new layer each; they are packed into the UBI copy, which becomes podcity-api and goes back to the warehouse. It is then deployed as a container on backend like any other image.', (at) => {
+    step('build', 'Containerfile', 'The R&D department writes a Containerfile FROM ubi:latest, put up as an advertising stand on the host roadside next to the host offices and wired to R&D (click it to read it). The crane brings a copy of the UBI image over from the warehouse as the starting point: its layer is reused, not copied. RUN installs nginx and each COPY adds the site and its config, one new layer each; they are packed into the UBI copy, which becomes podcity-api and goes back to the warehouse. It is then deployed as a container on backend like any other image.', (at) => {
       at(0, { type: 'image.build.start', image: CUSTOM, base: UBI, containerfile });
       containerfile
         .filter((line) => /^(RUN|COPY)\s/.test(line))
@@ -288,7 +288,7 @@ export function defaultSteps(seed = 42): Step[] {
       at(0.3, { type: 'network.connect', container: 'api-1', network: NET, ports: [] });
     }),
 
-    step('compose', 'Compose', 'A blueprint stand by the service road holds compose.yaml: the whole stack (db, podcity-api, web, metrics-collector) with its network, volume, secret, ports and mounts in one file. podman compose up --build --force-recreate first rebuilds podcity-api in R&D with a multi-stage Containerfile: the crane brings a UBI builder, the build runs on it, the final stage (UBI + nginx again) takes only the result and the builder is dumped, then a fresh UBI copy is craned in for the final stage. The layers come out identical, so it is the same podcity-api image. Then every service is redeployed at once: three more trucks join the deploy truck, one per service.', (at) => {
+    step('compose', 'Compose', 'An advertising stand next to the systemd Business Center holds compose.yaml (click it to read it): the whole stack (db, podcity-api, web, metrics-collector) with its network, volume, secret, ports and mounts in one file. podman compose up --build --force-recreate first rebuilds podcity-api in R&D with a multi-stage Containerfile: the crane brings a UBI builder, the build runs on it, the final stage (UBI + nginx again) takes only the result and the builder is dumped, then a fresh UBI copy is craned in for the final stage. The layers come out identical, so it is the same podcity-api image. Then every service is redeployed at once: three more trucks join the deploy truck, one per service.', (at) => {
       at(0, { type: 'compose.up', project: PROJECT, path: '~/podcity/compose.yaml', lines: composeFile, services: composeStack.map((c) => c.create.name) });
       // --build: podcity-api is rebuilt first, multi-stage.
       at(1, { type: 'image.build.start', image: CUSTOM, base: UBI, containerfile: multiStage });

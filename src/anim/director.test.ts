@@ -53,7 +53,7 @@ describe('Director fast-forward', () => {
     expect(k.get('volume')).toEqual(['vol:pgdata']);
     expect(k.get('host path')?.sort()).toEqual(['host:/home/user/migrations', 'host:/home/user/site']); // sheds outlive the one-off
     expect(k.get('scratch')).toHaveLength(1);
-    expect(k.get('port')).toHaveLength(1);
+    expect(new Set(k.get('port'))).toHaveProperty('size', 1); // gate and visitor bridge are one published port
     expect(k.get('secret')?.sort()).toEqual(['env:db-4:POSTGRESQL_PASSWORD', 'secret:pgpass']); // sealed card + the secret itself
     expect(k.get('env var')).toHaveLength(2);
     expect(k.get('layer')).toHaveLength(8); // ubi, nginx-124, postgresql-16 share UBI/s2i-core; podcity-api adds 3 on top of ubi (rebuild adds none)

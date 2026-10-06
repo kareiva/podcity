@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { quadletPavilionSlot, CITY_RADIUS, serviceGate, roundedPath, bayToStopRoute, secretStop, shopStop, stopToPlotRoute, stopToStopRoute, deployLaneZ, deployRoute, truckBay, FACTORY, ISO_20FT, buildCranes, buildWaypoints, pullCranes, pullWaypoints, unpackSpot, smoothPath, seaportLayout, hostPathSlot, quadletRoad, serviceRoute, labBenchSlot, SHELF_CAPACITY, districts, factorySlot, feederRoute, manifestSlot, networkBelt, shelfSlot, warehouseHall, type Pad } from './layout';
+import { FOOTBRIDGE, portBridge, visitorBridge, wallZ, containerfileStand, truckRoads, composeStand, spareLockerSlots, LOCKER, lockerSlot, quadletPavilionSlot, CITY_RADIUS, serviceGate, roundedPath, bayToStopRoute, secretStop, shopStop, stopToPlotRoute, stopToStopRoute, deployLaneZ, deployRoute, truckBay, FACTORY, ISO_20FT, buildCranes, buildWaypoints, pullCranes, pullWaypoints, unpackSpot, smoothPath, seaportLayout, hostPathSlot, quadletRoad, serviceRoute, labBenchSlot, SHELF_CAPACITY, districts, factorySlot, feederRoute, manifestSlot, networkBelt, shelfSlot, warehouseHall, type Pad } from './layout';
 
 const OUTSIDE = new Set(['seaport', 'hostLand', 'freight', 'businessCenter']);
 
@@ -32,11 +32,11 @@ describe('city layout', () => {
     expect(gate.z).toBeLessThan(serviceRoute[0]![1]);
   });
 
-  it('places the Environmental Shopping Center next to the Quadlet department, clear of the published-port roads', () => {
+  it('places the Environmental Shopping Center next to the Quadlet department, clear of the published-port bridges', () => {
     const sc = districts.shoppingCenter;
     const q = districts.quadlet;
     expect(Math.hypot(sc.x - q.x, sc.z - q.z)).toBeLessThan(25);
-    // Port roads run due south from each factory plot's door to the host highway.
+    // Port bridges run due south from each factory plot's roof to the host highway.
     for (let n = 0; n < 15; n++) {
       const x = factorySlot(n).x;
       expect(Math.abs(x - sc.x), `plot ${n} port road`).toBeGreaterThan(sc.w / 2 + 2);
@@ -93,7 +93,56 @@ describe('city layout', () => {
     expect(Math.hypot(x, z)).toBeLessThan(CITY_RADIUS); // inside the wall, so the unit file uses the service gate
   });
 
-  it('keeps host path offices on the near roadside: off the highway, outside the wall, clear of systemd and port roads', () => {
+  it('lays roads under every truck route, clear of the buildings they pass', () => {
+    const roads = truckRoads();
+    const half = 0.5; // sample points every half metre along each road
+    const onRoad = ([x, z]: [number, number]) =>
+      roads.some(({ points, width }) =>
+        points.slice(1).some(([bx, bz], i) => {
+          const [ax, az] = points[i]!;
+          const len = Math.hypot(bx - ax, bz - az);
+          const t = Math.max(0, Math.min(1, ((x - ax) * (bx - ax) + (z - az) * (bz - az)) / (len * len)));
+          return Math.hypot(x - (ax + (bx - ax) * t), z - (az + (bz - az) * t)) <= width / 2 + half;
+        }),
+      );
+    const routes = [
+      bayToStopRoute(shopStop()),
+      stopToStopRoute(shopStop(), secretStop()),
+      ...Array.from({ length: 5 }, (_, n) => stopToPlotRoute(secretStop(), factorySlot(n))),
+      ...Array.from({ length: 5 }, (_, n) => deployRoute(factorySlot(n))),
+    ];
+    for (const route of routes) for (const p of route) expect(onRoad(p), `${p}`).toBe(true);
+    const blocked: Pad[] = [warehouseHall(), districts.secrets, districts.shoppingCenter, ...Array.from({ length: 5 }, (_, n) => ({ ...factorySlot(n), w: FACTORY.w, d: FACTORY.l }))];
+    for (const { points, width } of roads)
+      for (const [x, z] of points)
+        for (const b of blocked) expect(Math.abs(x - b.x) < b.w / 2 + width / 2 - 1 && Math.abs(z - b.z) < b.d / 2 + width / 2 - 1, `${x},${z}`).toBe(false);
+  });
+
+  it('stands the compose billboard beside the systemd Business Center, facing the highway, clear of everything there', () => {
+    const b = districts.businessCenter;
+    const h = districts.hostLand;
+    const stand = { x: composeStand.x, z: composeStand.z, w: 8.8, d: 2.4 }; // turned: billboard runs east-west
+    expect(overlaps(stand, b)).toBe(false);
+    expect(Math.abs(stand.x - b.x)).toBeLessThan(b.w / 2 + 10); // next to it
+    expect(stand.z + stand.d / 2).toBeLessThan(h.z - h.d / 2); // on the roadside, not on the highway
+    expect(Math.abs(stand.x - h.x) + stand.w / 2).toBeLessThan(h.w / 2);
+    expect(Math.hypot(stand.x + stand.w / 2, stand.z - stand.d / 2)).toBeGreaterThan(CITY_RADIUS); // outside the wall
+    for (let p = 0; p < 3; p++) expect(overlaps(stand, { ...quadletPavilionSlot(p), w: 4.4, d: 4.4 })).toBe(false);
+    for (let n = 0; n < 5; n++) expect(overlaps(stand, { ...hostPathSlot(n), w: 5, d: 5 })).toBe(false);
+  });
+
+  it('fills the locker yard with spare lockers that fit inside it, the volume row among them', () => {
+    const y = districts.lockers;
+    const spares = spareLockerSlots();
+    expect(spares.length).toBeGreaterThan(6);
+    for (const s of spares) {
+      expect(Math.abs(s.x - y.x) + LOCKER.w / 2).toBeLessThanOrEqual(y.w / 2);
+      expect(Math.abs(s.z - y.z) + LOCKER.d / 2).toBeLessThanOrEqual(y.d / 2);
+    }
+    expect(spares).toContainEqual(lockerSlot(0)); // a volume's locker rises over a spare
+  });
+
+  it('keeps host path offices on the near roadside: off the highway, outside the wall, clear of systemd and port bridges', () => {
     const h = districts.hostLand;
     const office = (n: number) => ({ ...hostPathSlot(n), w: 5, d: 5 });
     const roadHalf = 2.5 / 2;
@@ -107,6 +156,51 @@ describe('city layout', () => {
       for (let p = 0; p < 3; p++) expect(overlaps(o, { ...quadletPavilionSlot(p), w: 4.4, d: 4.4 }), `office ${n} / pavilion ${p}`).toBe(false);
       for (let c = 0; c < 5; c++) expect(Math.abs(factorySlot(c).x - o.x), `office ${n} / port road ${c}`).toBeGreaterThan(o.w / 2 + roadHalf);
     }
+  });
+
+  it('stands the Containerfile billboard right of the host offices, facing the highway, clear of everything there', () => {
+    const h = districts.hostLand;
+    const stand = { x: containerfileStand.x, z: containerfileStand.z, w: 8.8, d: 2.4 }; // turned: board runs east-west
+    expect(stand.z + stand.d / 2).toBeLessThan(h.z - h.d / 2); // on the roadside, not on the highway
+    expect(Math.abs(stand.x - h.x) + stand.w / 2).toBeLessThan(h.w / 2);
+    for (const [cx, cz] of [[stand.x - stand.w / 2, stand.z - stand.d / 2], [stand.x + stand.w / 2, stand.z - stand.d / 2]] as const)
+      expect(Math.hypot(cx, cz)).toBeGreaterThan(CITY_RADIUS); // outside the wall
+    expect(stand.x).toBeGreaterThan(hostPathSlot(1).x); // right of the scenario's two offices
+    for (let n = 0; n < 5; n++) expect(overlaps(stand, { ...hostPathSlot(n), w: 5, d: 5 }), `office ${n}`).toBe(false);
+    for (let c = 0; c < 5; c++) expect(Math.abs(factorySlot(c).x - stand.x), `port road ${c}`).toBeGreaterThan(stand.w / 2 + 2.5 / 2);
+    expect(overlaps(stand, districts.businessCenter)).toBe(false);
+    expect(overlaps(stand, { x: composeStand.x, z: composeStand.z, w: 8.8, d: 2.4 })).toBe(false);
+  });
+
+  it('carries published ports on visitor bridges that clear the trucks, keep piers off the roads and land on the highway', () => {
+    const truckTop = 1.1 + ISO_20FT.h + 0.5; // bed, container, cards on its roof
+    expect(FOOTBRIDGE.deck - 0.7).toBeGreaterThan(truckTop); // girders above the plot lanes
+    expect(FOOTBRIDGE.gate).toBeGreaterThan(FOOTBRIDGE.deck + 2.2); // visitors walk under the port gate
+    const f = districts.factories;
+    const h = districts.hostLand;
+    for (let c = 0; c < 5; c++) {
+      const b = portBridge(factorySlot(c), 0);
+      expect(b.from).toBeLessThan(factorySlot(c).z + FACTORY.l / 2); // kiosk on the roof
+      expect(b.to).toBe(h.z - h.d / 2); // stair ends at the highway's edge
+      expect(b.landing).toBeGreaterThan(wallZ(b.x) + 2); // stair outside the wall
+      for (const z of b.piers) {
+        expect(z).toBeGreaterThan(f.z + f.d / 2); // no piers among the plots and lanes
+        expect(Math.abs(z - wallZ(b.x))).toBeGreaterThan(2);
+        for (const { points, width } of truckRoads())
+          for (const [i, [bx, bz]] of points.slice(1).entries()) {
+            const [ax, az] = points[i]!;
+            const road = { x: (ax + bx) / 2, z: (az + bz) / 2, w: Math.abs(bx - ax) || width, d: Math.abs(bz - az) || width };
+            expect(overlaps({ x: b.x, z, w: 1, d: 1 }, road)).toBe(false);
+          }
+      }
+      expect(b.piers.length).toBeGreaterThan(3);
+    }
+    // The city's bridge stands in the first plot's column; only a published port takes it into the hall.
+    const web = factorySlot(0);
+    expect(visitorBridge.x).toBe(web.x);
+    expect(visitorBridge.stub).toBe(visitorBridge.piers[0]); // ends at its last column...
+    expect(visitorBridge.stub).toBeGreaterThan(districts.factories.z + districts.factories.d / 2); // ...outside the hall
+    expect(visitorBridge.from).toBeLessThan(web.z + FACTORY.l / 2); // a published port links it to a kiosk on the roof
   });
 
   it('puts the seaport terminal on the quay, clear of the container pick-up, and the ship on open water', () => {
