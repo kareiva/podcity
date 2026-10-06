@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CITY_RADIUS, serviceGate, roundedPath, bayToStopRoute, secretStop, shopStop, stopToPlotRoute, stopToStopRoute, deployLaneZ, deployRoute, truckBay, FACTORY, ISO_20FT, buildCranes, buildWaypoints, pullCranes, pullWaypoints, unpackSpot, smoothPath, seaportLayout, hostPathSlot, quadletRoad, serviceRoute, labBenchSlot, SHELF_CAPACITY, districts, factorySlot, feederRoute, manifestSlot, networkBelt, shelfSlot, warehouseHall, type Pad } from './layout';
+import { quadletPavilionSlot, CITY_RADIUS, serviceGate, roundedPath, bayToStopRoute, secretStop, shopStop, stopToPlotRoute, stopToStopRoute, deployLaneZ, deployRoute, truckBay, FACTORY, ISO_20FT, buildCranes, buildWaypoints, pullCranes, pullWaypoints, unpackSpot, smoothPath, seaportLayout, hostPathSlot, quadletRoad, serviceRoute, labBenchSlot, SHELF_CAPACITY, districts, factorySlot, feederRoute, manifestSlot, networkBelt, shelfSlot, warehouseHall, type Pad } from './layout';
 
 const OUTSIDE = new Set(['seaport', 'hostLand', 'freight', 'businessCenter']);
 
@@ -93,12 +93,19 @@ describe('city layout', () => {
     expect(Math.hypot(x, z)).toBeLessThan(CITY_RADIUS); // inside the wall, so the unit file uses the service gate
   });
 
-  it('keeps host path sheds on the roadside, off the host highway', () => {
+  it('keeps host path offices on the near roadside: off the highway, outside the wall, clear of systemd and port roads', () => {
     const h = districts.hostLand;
+    const office = (n: number) => ({ ...hostPathSlot(n), w: 5, d: 5 });
+    const roadHalf = 2.5 / 2;
     for (let n = 0; n < 5; n++) {
-      const shed = hostPathSlot(n);
-      expect(shed.z - 2.5, `shed ${n}`).toBeGreaterThan(h.z + h.d / 2);
-      expect(Math.abs(shed.x - h.x), `shed ${n}`).toBeLessThan(h.w / 2);
+      const o = office(n);
+      expect(o.z + o.d / 2, `office ${n}`).toBeLessThan(h.z - h.d / 2); // north of the highway
+      expect(Math.abs(o.x - h.x) + o.w / 2, `office ${n}`).toBeLessThan(h.w / 2);
+      for (const [cx, cz] of [[o.x - 2.5, o.z - 2.5], [o.x + 2.5, o.z - 2.5]] as const)
+        expect(Math.hypot(cx, cz), `office ${n} outside the wall`).toBeGreaterThan(CITY_RADIUS);
+      expect(overlaps(o, districts.businessCenter)).toBe(false);
+      for (let p = 0; p < 3; p++) expect(overlaps(o, { ...quadletPavilionSlot(p), w: 4.4, d: 4.4 }), `office ${n} / pavilion ${p}`).toBe(false);
+      for (let c = 0; c < 5; c++) expect(Math.abs(factorySlot(c).x - o.x), `office ${n} / port road ${c}`).toBeGreaterThan(o.w / 2 + roadHalf);
     }
   });
 

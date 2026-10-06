@@ -395,8 +395,14 @@ export function doorQueueSlot(factory: { x: number; z: number }, n: number): { x
 
 export const HIGHWAY_LANES = 3;
 
-/** Plot for the n-th host path: a shed on the far roadside of the host highway. */
+/**
+ * Plot for the n-th host path: an office on the near (north) roadside of the host highway, between the wall
+ * and the road. East of the systemd Business Center and its quadlet pavilions, each in the gap between two
+ * factory plot columns, so published-port roads (which run due south from a plot column) pass between them.
+ */
 export function hostPathSlot(n: number): { x: number; z: number } {
   const h = districts.hostLand;
-  return { x: h.x - h.w / 2 + 12 + n * 12, z: h.z + h.d / 2 + 4 };
+  const f = districts.factories;
+  const firstGap = f.x - f.w / 2 + SLOT_SPACING; // between plot columns 0 and 1
+  return { x: firstGap + n * SLOT_SPACING, z: h.z - h.d / 2 - 4 };
 }

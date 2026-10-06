@@ -1178,7 +1178,7 @@ export class Director {
   }
 
   /** Host paths live on the host land and outlive every container. */
-  /** A host path is a small two-storey office building on the far side of the host highway. */
+  /** A host path is a small two-storey office building on the near (city) side of the host highway. */
   private async ensureHostPath(path: string): Promise<THREE.Group> {
     const existing = this.hostPaths.get(path);
     if (existing) return existing;
@@ -1196,13 +1196,13 @@ export class Director {
     unit.position.set(1, OFFICE.h + 0.8, -1);
     const door = this.mesh(palette.hostPath);
     door.scale.set(1.1, 1.8, 0.1);
-    door.position.set(0, 0.9, -OFFICE.d / 2 - 0.05); // faces the highway (north)
+    door.position.set(0, 0.9, OFFICE.d / 2 + 0.05); // faces the highway (south)
     office.add(body, roof, unit, door);
     // Two floors of windows on every side.
     for (let floor = 0; floor < 2; floor++)
       for (const side of [0, 1, 2, 3])
         for (const across of [-1.2, 1.2]) {
-          if (floor === 0 && side === 0 && Math.abs(across) < 2) continue; // ground floor front: the door
+          if (floor === 0 && side === 2 && Math.abs(across) < 2) continue; // ground floor front (south): the door
           const win = this.mesh(palette.water);
           const along = side % 2 === 0;
           win.scale.set(along ? 1.1 : 0.08, 1, along ? 0.08 : 1.1);
