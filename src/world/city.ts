@@ -5,6 +5,8 @@ import { makeGate } from './gate';
 import { makeLabel } from './label';
 import {
   CITY_RADIUS,
+  CITY_WALL,
+  wallGates,
   CRANE_HEIGHT,
   HIGHWAY_LANES,
   ISO_20FT,
@@ -20,6 +22,8 @@ import {
   spareLockerSlots,
   truckRoads,
   parkingLot,
+  freightLayout,
+  TRAIN,
   parkingStalls,
   visitorBridge,
   districts, quadletOffice, quadletRoad, SYSTEMD_TOWER, rndLab, serviceGate, serviceRoute, warehouseHall, type DistrictId, type Pad } from './layout';
@@ -58,13 +62,7 @@ export function buildCity(scene: THREE.Scene): City {
   water.position.set(-150, 0.05, 0);
   scene.add(water);
 
-  const wall = new THREE.Mesh(
-    new THREE.CylinderGeometry(CITY_RADIUS, CITY_RADIUS, 3, 96, 1, true),
-    new THREE.MeshStandardMaterial({ color: palette.wall, side: THREE.DoubleSide, flatShading: true }),
-  );
-  wall.position.y = 1.5;
-  wall.castShadow = true;
-  scene.add(wall);
+  buildFactoryWall(scene);
 
   for (const [id, pad] of Object.entries(districts) as [DistrictId, Pad][]) {
     const color = id === 'hostLand' || id === 'businessCenter' ? palette.road : 0xa9b89d; // host land is asphalt
@@ -83,6 +81,7 @@ export function buildCity(scene: THREE.Scene): City {
   addRoad(scene, quadletRoad);
   for (const r of truckRoads()) addRoad(scene, r.points, palette.road, r.width, 0.34); // port footbridges cross above them
   buildParkingLot(scene);
+  buildFreightStation(scene);
   // The service road enters the city through a gate in the south wall: systemd lives on the host.
   const gatePos = serviceGate();
   const gate = makeGate(4, false);
@@ -181,6 +180,174 @@ function buildTowerCrane(scene: THREE.Scene, spec: CraneSpec): void {
   crane.traverse((o) => (o.castShadow = true));
   tag(crane, { key: spec.name, kind: 'district', name: 'Crane · image delivery' });
   scene.add(crane);
+}
+
+/** Top of a flatcar's deck: where a container stands on the train. */
+export const FLATCAR_DECK = 1.5;
+
+/** Height of the freight station's gantry crane beam. */
+export const FREIGHT_GANTRY_HEIGHT = 9;
+
+/**
+ * Freight station: the railway (sleepers and two rails) from a buffer stop at the station's west end east through
+ * a portal in the wall to the edge of the map; a gantry crane spanning the loading lane and the track; and the
+ * waiting train (locomotive facing east, three empty flatcars). The director animates loading and departure.
+ */
+function buildFreightStation(scene: THREE.Scene): void {
+  const fl = freightLayout();
+  const z = fl.railZ;
+
+  // Railway: a gravel bed, sleepers every metre, two steel rails, a buffer stop at the west end.
+  const rail = new THREE.Group();
+  rail.name = 'railway';
+  const length = fl.track.to - fl.track.from;
+  const ballast = new THREE.Mesh(new THREE.BoxGeometry(length + 1, 0.3, TRAIN.gauge + 2), mat(0x8b8680));
+  ballast.position.set(fl.track.from + length / 2, 0.15, z);
+  ballast.receiveShadow = true;
+  rail.add(ballast);
+  const sleepers = new THREE.InstancedMesh(new THREE.BoxGeometry(0.4, 0.15, TRAIN.gauge + 1.2), mat(0x6b4f3a), Math.floor(length));
+  const m = new THREE.Matrix4();
+  for (let i = 0; i < sleepers.count; i++) sleepers.setMatrixAt(i, m.makeTranslation(fl.track.from + 0.5 + i, 0.37, z));
+  sleepers.receiveShadow = true;
+  rail.add(sleepers);
+  for (const side of [-1, 1]) {
+    const r = new THREE.Mesh(new THREE.BoxGeometry(length, 0.15, 0.12), mat(0x9ca3af));
+    r.position.set(fl.track.from + length / 2, 0.5, z + (side * TRAIN.gauge) / 2);
+    rail.add(r);
+  }
+  const buffer = new THREE.Mesh(new THREE.BoxGeometry(0.6, 1.2, TRAIN.gauge + 1), mat(palette.error));
+  buffer.position.set(fl.track.from - 0.3, 0.9, z);
+  rail.add(buffer);
+  tag(rail, { key: 'railway:openshift', kind: 'district', name: 'Railway · to the OpenShift metropolis' });
+  scene.add(rail);
+
+  // The railway's exit: a portal in the east wall.
+  const portal = makeGate(TRAIN.gauge + 2.6, true, palette.tower, 6.5);
+  portal.position.set(fl.portal.x, 0, fl.portal.z);
+  tag(portal, { key: 'railway:portal', kind: 'district', name: 'Railway portal · exit east to OpenShift' });
+  scene.add(portal);
+
+  // Gantry crane over the middle flatcar: legs either side of the lane and the track, a beam north-south with a
+  // trolley and hoist that travel between the truck under it and the train.
+  const crane = new THREE.Group();
+  crane.name = 'crane:freight';
+  crane.position.set(fl.crane.x, 0.3, fl.crane.z);
+  const h = FREIGHT_GANTRY_HEIGHT;
+  const halfX = ISO_20FT.l / 2 + 1.6;
+  const halfZ = fl.crane.span / 2;
+  for (const x of [-halfX, halfX]) {
+    for (const zz of [-halfZ, halfZ]) {
+      const leg = new THREE.Mesh(new THREE.BoxGeometry(0.45, h, 0.45), mat(palette.pod));
+      leg.position.set(x, h / 2, zz);
+      crane.add(leg);
+    }
+    const beam = new THREE.Mesh(new THREE.BoxGeometry(0.45, 0.6, fl.crane.span + 0.45), mat(palette.pod));
+    beam.position.set(x, h, 0);
+    crane.add(beam);
+    const sill = new THREE.Mesh(new THREE.BoxGeometry(0.6, 0.3, 1.4), mat(palette.bars)); // wheel bogies
+    for (const zz of [-halfZ, halfZ]) {
+      const b = sill.clone();
+      b.position.set(x, 0.15, zz);
+      crane.add(b);
+    }
+  }
+  const trolley = new THREE.Group(); // runs along the beams; the hoist hangs from it
+  trolley.name = 'trolley';
+  trolley.position.set(0, h, fl.loadZ - fl.crane.z);
+  const carriage = new THREE.Mesh(new THREE.BoxGeometry(halfX * 2 + 0.6, 0.5, 1.4), mat(palette.bars));
+  trolley.add(carriage);
+  addHoist(trolley, 0);
+  crane.add(trolley);
+  crane.traverse((o) => (o.castShadow = true));
+  tag(crane, { key: 'crane:freight', kind: 'district', name: 'Freight crane · containers -> train' });
+  scene.add(crane);
+
+  // The waiting train: locomotive at the east end facing the exit, three empty flatcars.
+  const train = new THREE.Group();
+  train.name = 'train:freight';
+  const wheels = new THREE.CylinderGeometry(0.4, 0.4, 0.25, 10);
+  const addWheels = (car: THREE.Group, len: number) => {
+    for (const x of [-len / 2 + 1, len / 2 - 1])
+      for (const side of [-1, 1]) {
+        const w = new THREE.Mesh(wheels, mat(palette.road));
+        w.rotation.x = Math.PI / 2;
+        w.position.set(x, 0.85, z + (side * TRAIN.gauge) / 2);
+        car.add(w);
+      }
+  };
+  fl.train.cars.forEach((x, i) => {
+    const car = new THREE.Group();
+    car.name = `flatcar:${i}`;
+    car.position.x = x;
+    const deck = new THREE.Mesh(new THREE.BoxGeometry(TRAIN.car - 0.4, 0.3, ISO_20FT.w + 0.3), mat(palette.bars));
+    deck.position.set(0, FLATCAR_DECK - 0.15, z);
+    car.add(deck);
+    addWheels(car, TRAIN.car - 0.4);
+    train.add(car);
+  });
+  const loco = new THREE.Group();
+  loco.name = 'locomotive';
+  loco.position.x = fl.train.loco;
+  const body = new THREE.Mesh(new THREE.BoxGeometry(TRAIN.loco - 1.6, 2.4, ISO_20FT.w), mat(palette.error));
+  body.position.set(-0.8, 2.7, z);
+  const cab = new THREE.Mesh(new THREE.BoxGeometry(1.6, 3, ISO_20FT.w), mat(palette.error));
+  cab.position.set(TRAIN.loco / 2 - 0.8, 3, z);
+  const windscreen = new THREE.Mesh(new THREE.BoxGeometry(0.05, 0.8, ISO_20FT.w - 0.4), mat(palette.water));
+  windscreen.position.set(TRAIN.loco / 2 + 0.01, 3.7, z);
+  const chassis = new THREE.Mesh(new THREE.BoxGeometry(TRAIN.loco, 0.4, ISO_20FT.w + 0.2), mat(palette.bars));
+  chassis.position.set(0, 1.35, z);
+  loco.add(body, cab, windscreen, chassis);
+  addWheels(loco, TRAIN.loco);
+  train.add(loco);
+  train.traverse((o) => (o.castShadow = true));
+  tag(train, { key: 'train:freight', kind: 'district', name: 'Freight train · to the OpenShift metropolis' });
+  scene.add(train);
+}
+
+/**
+ * The factory wall: straight runs of wall along each side, with a pilaster every few metres and a coping strip on
+ * top, broken where a gate stands (south: service road, visitor bridge; east: railway portal).
+ */
+function buildFactoryWall(scene: THREE.Scene): void {
+  const w = CITY_WALL;
+  const wall = new THREE.Group();
+  wall.name = 'wall';
+  const body = mat(palette.wall);
+  const trim = mat(0x9c9282);
+  const PILASTER = 8;
+  // A straight run between two corners, minus the gate openings on it. `along` is x for north/south, z for east/west.
+  const run = (fixed: number, from: number, to: number, alongX: boolean, gaps: { at: number; width: number }[]) => {
+    const cuts = gaps.map((g) => [g.at - g.width / 2, g.at + g.width / 2] as const).sort((a, b) => a[0] - b[0]);
+    let start = from;
+    for (const [a, b] of [...cuts, [to, to] as const]) {
+      const end = Math.min(a, to);
+      if (end - start > 0.1) {
+        const len = end - start;
+        const mid = (start + end) / 2;
+        const seg = new THREE.Mesh(new THREE.BoxGeometry(alongX ? len : w.thickness, w.height, alongX ? w.thickness : len), body);
+        seg.position.set(alongX ? mid : fixed, w.height / 2, alongX ? fixed : mid);
+        const coping = new THREE.Mesh(new THREE.BoxGeometry(alongX ? len : w.thickness + 0.3, 0.2, alongX ? w.thickness + 0.3 : len), trim);
+        coping.position.set(seg.position.x, w.height + 0.1, seg.position.z);
+        wall.add(seg, coping);
+        const n = Math.max(1, Math.round(len / PILASTER));
+        for (let i = 0; i <= n; i++) {
+          const p = start + (len * i) / n;
+          const pilaster = new THREE.Mesh(new THREE.BoxGeometry(1.1, w.height + 0.4, 1.1), trim);
+          pilaster.position.set(alongX ? p : fixed, (w.height + 0.4) / 2, alongX ? fixed : p);
+          wall.add(pilaster);
+        }
+      }
+      start = Math.max(start, b);
+    }
+  };
+  const gates = wallGates();
+  const on = (side: 'south' | 'east') => gates.filter((g) => g.side === side);
+  run(w.north, w.west, w.east, true, []);
+  run(w.south, w.west, w.east, true, on('south'));
+  run(w.west, w.north, w.south, false, []);
+  run(w.east, w.north, w.south, false, on('east'));
+  wall.traverse((o) => (o.castShadow = true));
+  scene.add(wall);
 }
 
 /** Car park for compose's extra trucks: an asphalt pad with white stall lines between the stalls. */

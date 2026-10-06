@@ -132,7 +132,8 @@ function envFlag(v: EnvVar): string {
 
 function mountFlag(m: Extract<SimEvent, { type: 'container.create' }>['mounts'][number]): string {
   if (m.kind === 'tmpfs') return ` --tmpfs ${m.target}`;
-  return ` -v ${m.source}:${m.target}${m.readOnly ? ':ro' : ''}`;
+  const opts = [...(m.readOnly ? ['ro'] : []), ...(m.relabel ? [m.relabel === 'private' ? 'Z' : 'z'] : [])];
+  return ` -v ${m.source}:${m.target}${opts.length ? `:${opts.join(',')}` : ''}`;
 }
 
 /** `--network`, `-p`, mounts and env, in the order podman's docs usually show them. */
@@ -173,7 +174,8 @@ function describe(e: SimEvent): string {
     case 'systemd.daemon-reload': return `systemctl --user daemon-reload  # ${e.generated.map((g) => `${g.quadlet} -> ${g.unit}`).join(', ')}`;
     case 'network.request': return `  ${e.from} -> ${e.to} on ${e.network}: ${e.label}`;
     case 'pod.create': return `podman pod create --name ${e.name}`;
-    case 'kube.generate': return `podman kube generate ${e.pod}`;
+    case 'kube.generate': return `podman kube generate --podname ${e.pod} ${e.containers.map((c) => c.name).join(' ')} -f ${e.path}`;
+    case 'kube.deploy': return `oc apply -f ${e.path}  # pod/${e.pod} -> ${e.cluster}`;
     case 'resource.sample': return `  ${e.id} cpu ${(e.cpu * 100).toFixed(0)}%`;
   }
 }

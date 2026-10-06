@@ -9,6 +9,7 @@ export interface Mount {
   source: string; // volume name, host path, or 'tmpfs'
   target: string; // path inside the container
   readOnly?: boolean;
+  relabel?: 'shared' | 'private'; // SELinux :z (shared label) or :Z (private to the container: its MCS categories)
 }
 
 export interface EnvVar {
@@ -55,6 +56,7 @@ export type SimEvent =
       runFor?: number;
       compose?: string; // compose project that (re)created it
       dependsOn?: string[]; // compose depends_on: names of services that must be up before this one is deployed
+      selinuxLevel?: string; // MCS level podman picked for it (`s0:c<a>,c<b>`): its process label and :Z mount label
       // Create-time flags `--network` and `-p`; the connection itself is announced by network.connect when it starts.
       network?: string;
       ports?: Port[];
@@ -77,7 +79,9 @@ export type SimEvent =
   // podman compose up: the stack described in a compose file; its containers follow as container.* events tagged with the project
   | { type: 'compose.up'; project: string; path: string; lines: string[]; services: string[] }
   | { type: 'pod.create'; id: string; name: string }
-  | { type: 'kube.generate'; pod: string }
+  // podman kube generate: a Kubernetes Pod YAML from running containers (written to `path`)
+  | { type: 'kube.generate'; pod: string; path: string; containers: { id: string; name: string; image: string }[]; yaml: string[] }
+  | { type: 'kube.deploy'; pod: string; path: string; cluster: string } // the YAML applied to a cluster (oc apply)
   | { type: 'resource.sample'; id: string; cpu: number; mem: number; memLimit?: number };
 
 export type SimEventType = SimEvent['type'];

@@ -4,7 +4,7 @@ import type { EventBus } from '../sim/bus';
 import type { EnvVar, EventOf, Mount } from '../sim/events';
 import type { Tweener } from '../engine/tween';
 import { ease } from '../engine/tween';
-import { HOIST_REST, TRUCK_BED } from '../world/city';
+import { FLATCAR_DECK, FREIGHT_GANTRY_HEIGHT, HOIST_REST, TRUCK_BED } from '../world/city';
 import { keys, tag, type EntityInfo } from '../world/entity';
 import { makeLabel } from '../world/label';
 import {
@@ -54,6 +54,12 @@ import {
   portBridge,
   visitorBridge,
   FOOTBRIDGE,
+  TRAIN,
+  bayToFreightRoute,
+  freightToBayRoute,
+  freightToLotRoute,
+  freightLayout,
+  timetableStand,
 } from '../world/layout';
 import { bridgeWalkway, makeBridgeLink, makeFootbridge } from '../world/footbridge';
 import { imageColor, palette } from '../world/palette';
@@ -62,6 +68,7 @@ import { ArcLayer } from './arcs';
 const FACTORY_SIZE = new THREE.Vector3(FACTORY.w, FACTORY.h, FACTORY.l); // ISO 20ft proportions
 const LOCKER_SIZE = new THREE.Vector3(LOCKER.w, LOCKER.h, LOCKER.d);
 const OFFICE = { w: 5, h: 6, d: 5 }; // host path: small office building on the host highway
+const TIMETABLE = { w: 8, h: 6, bottom: 1.5 }; // departure board by the freight station
 const CARGO = ISO_20FT; // images travel as real-size 20ft shipping containers
 const HOIST_CARRY = 4; // hook length while a crane swings a container (clears the city wall)
 const BELT_HEIGHT = 1.2;
@@ -179,6 +186,8 @@ export class Director {
   private truckWaiters: (() => void)[] = []; // deliveries waiting for a free truck
   private fleetWaiters: (() => void)[] = []; // deployments waiting for a service they depend on to leave or be up
   private departed = new Set<string>(); // `project:name` of containers whose truck has left with them
+  private trainLoad: THREE.Object3D[] = []; // containers (and the pod shell) on the freight train, moved with it
+  private timetables = new Map<string, THREE.Group>(); // pod -> its timetable board at the freight station
   private secrets = new Map<string, THREE.Mesh>(); // podman secret -> plaque at the Secret Facility
   private units = new Map<string, THREE.Mesh>(); // generated systemd unit -> plate on the tower
   private trafficPaths = new Map<string, ReturnType<typeof pathSampler>>(); // `net|a|b` -> feeder-belt-feeder path
@@ -249,7 +258,8 @@ export class Director {
         await this.expose(e);
       }),
     );
-    // TODO: pod.create, kube.generate choreographies.
+    bus.on('kube.generate', (e) => this.enqueue(`kube:${e.pod}`, () => this.packPod(e)));
+    bus.on('kube.deploy', (e) => this.enqueue(`kube:${e.pod}`, () => this.departTrain(e)));
   }
 
   /** Drop every dynamic object and pending choreography. */
@@ -271,6 +281,8 @@ export class Director {
     this.truckWaiters = [];
     this.fleetWaiters = [];
     this.departed.clear();
+    this.trainLoad = [];
+    this.timetables.clear();
     this.restCranes();
   }
 
@@ -315,6 +327,20 @@ export class Director {
     }
     const roof = this.scene.getObjectByName('systemd:roof');
     if (roof) roof.position.y = SYSTEMD_TOWER.base + 1.5; // unit floors are dynamic and went with the reset
+    const freight = this.scene.getObjectByName('crane:freight');
+    const trolley = freight?.getObjectByName('trolley');
+    if (trolley) {
+      const fl = freightLayout();
+      trolley.position.z = fl.loadZ - fl.crane.z;
+      const hoist = trolley.getObjectByName('hoist')!;
+      this.setHoist(hoist, HOIST_REST);
+      for (const load of hoist.getObjectByName('hook')!.children.filter((c) => c.name !== 'block')) this.dispose(load);
+    }
+    const train = this.scene.getObjectByName('train:freight');
+    if (train) {
+      train.position.x = 0; // back at the station, empty
+      train.visible = true;
+    }
     const truck = this.scene.getObjectByName('truck:deploy');
     if (truck) {
       truck.position.set(truckBay.x, 0.3, truckBay.z);
@@ -735,26 +761,45 @@ export class Director {
     });
   }
 
-  /** A text document (Containerfile, unit file) pinned on a board, its text floating above. */
-  private async pinDocument(at: { x: number; z: number }, lines: string[], info: Omit<EntityInfo, 'detail'>): Promise<THREE.Group> {
-    const sheet = new THREE.Group();
-    sheet.position.set(at.x, 0.3, at.z);
-    const paper = this.mesh(palette.card);
-    paper.name = 'paper';
-    paper.scale.set(3, 4, 0.2);
-    paper.position.y = 2.6;
-    const post = this.mesh(palette.bars);
-    post.scale.set(0.3, 0.6, 0.3);
-    post.position.y = 0.3;
-    sheet.add(paper, post);
-    const text = makeLabel(lines.join('\n'), 'label containerfile');
-    text.name = 'text';
-    text.position.set(0, 5, 0); // just above the paper, below the district label
-    sheet.add(text);
-    tag(sheet, { ...info, detail: lines.join('\n') });
-    this.root.add(sheet);
-    await this.tw.tween({ duration: 0.8, ease: ease.outBack, update: (k) => sheet.scale.setScalar(Math.max(k, 0.01)) });
-    return sheet;
+  /**
+   * A quadlet as a small quad bike, parked facing south in the Quadlet Department: a chassis, fenders, a seat,
+   * a steering column with handlebars, and four wheels. Its forward is local +x, so it can ride a road. The unit
+   * file's text is shown only on click (tooltip).
+   */
+  private async parkQuadBike(at: { x: number; z: number }, lines: string[], info: Omit<EntityInfo, 'detail'>): Promise<THREE.Group> {
+    const bike = new THREE.Group();
+    bike.position.set(at.x, 0.3, at.z);
+    bike.rotation.y = -Math.PI / 2; // facing south, toward the road
+    const body = new THREE.Group();
+    body.name = 'quad';
+    body.scale.setScalar(1.3);
+    const part = (color: number, w: number, h: number, d: number, x: number, y: number, z: number) => {
+      const m = this.mesh(color);
+      m.scale.set(w, h, d);
+      m.position.set(x, y, z);
+      body.add(m);
+      return m;
+    };
+    part(palette.tower, 1.8, 0.35, 0.8, 0, 0.55, 0); // chassis
+    part(palette.tower, 0.75, 0.15, 1.35, 0.62, 0.88, 0); // front fender
+    part(palette.tower, 0.75, 0.15, 1.35, -0.62, 0.88, 0); // rear fender
+    part(palette.bars, 0.8, 0.2, 0.5, -0.15, 0.95, 0); // seat
+    part(palette.bars, 0.1, 0.65, 0.1, 0.5, 1.15, 0).rotation.z = 0.35; // steering column, raked back
+    part(palette.bars, 0.12, 0.1, 1.0, 0.42, 1.48, 0); // handlebars
+    const wheel = new THREE.CylinderGeometry(0.35, 0.35, 0.3, 12);
+    for (const x of [-0.65, 0.65])
+      for (const z of [-0.6, 0.6]) {
+        const w = new THREE.Mesh(wheel, new THREE.MeshStandardMaterial({ color: palette.road, flatShading: true }));
+        w.rotation.x = Math.PI / 2;
+        w.position.set(x, 0.35, z);
+        body.add(w);
+      }
+    body.traverse((o) => (o.castShadow = true));
+    bike.add(body);
+    tag(bike, { ...info, detail: lines.join('\n') });
+    this.root.add(bike);
+    await this.tw.tween({ duration: 0.8, ease: ease.outBack, update: (k) => bike.scale.setScalar(Math.max(k, 0.01)) });
+    return bike;
   }
 
   /**
@@ -1115,9 +1160,9 @@ export class Director {
    * written before it (only the newest shows its text), with an arc from the image it runs.
    */
   private async writeQuadlet(e: EventOf<'quadlet.create'>): Promise<void> {
-    for (const older of this.quadlets.values()) this.dropText(older);
     const { board } = quadletOffice();
-    const sheet = await this.pinDocument({ x: board.x, z: board.z + this.quadlets.size * 0.4 }, [`# ${e.path}`, ...e.lines], {
+    // Parked in a row, side by side, in front of the office.
+    const sheet = await this.parkQuadBike({ x: board.x - 4 + this.quadlets.size * 2.6, z: board.z }, [`# ${e.path}`, ...e.lines], {
       key: keys.quadlet(e.file),
       kind: 'quadlet',
       name: e.file,
@@ -1131,12 +1176,7 @@ export class Director {
     const sheet = this.quadlets.get(file);
     await this.whenImage(image);
     const from = this.imageTop(image);
-    if (sheet && from) await this.arcs.connect(keys.image(image), keys.quadlet(file), from, sheet.position.clone().setY(5), imageColor(image));
-  }
-
-  private dropText(sheet: THREE.Object3D): void {
-    const text = sheet.getObjectByName('text');
-    if (text) this.dispose(text);
+    if (sheet && from) await this.arcs.connect(keys.image(image), keys.quadlet(file), from, quadletTop(sheet), imageColor(image));
   }
 
   /**
@@ -1156,7 +1196,6 @@ export class Director {
     let plate: THREE.Mesh | undefined;
     try {
       await this.arcs.disconnect(keys.quadlet(file));
-      this.dropText(sheet);
       const [roadX, roadZ] = quadletRoad[0]!;
       const yard = spot.z - 8; // between the wall and the tower, then east to the pavilion
       await this.ride(sheet, smoothPath([[sheet.position.x, sheet.position.z], [roadX, roadZ], ...quadletRoad.slice(1), [roadX, yard], [spot.x, yard], [spot.x, spot.z]]), 3.5);
@@ -1171,14 +1210,14 @@ export class Director {
     await Promise.all([
       this.flash(plate),
       this.connectQuadlet(file, image),
-      this.arcs.connect(keys.quadlet(file), keys.unit(unit), sheet.position.clone().setY(5), plate.position.clone(), palette.tower),
+      this.arcs.connect(keys.quadlet(file), keys.unit(unit), quadletTop(sheet), plate.position.clone(), palette.tower),
     ]);
   }
 
-  /** A small open pavilion rises round the unit file, which shrinks to a notice board inside. */
+  /** A small open pavilion rises round the quad bike, parked inside it. */
   private async raisePavilion(sheet: THREE.Group): Promise<void> {
-    const paper = sheet.getObjectByName('paper');
     const parts = new THREE.Group();
+    parts.name = 'pavilion';
     const floor = this.mesh(palette.building);
     floor.scale.set(4.4, 0.3, 4.4);
     floor.position.y = 0.15;
@@ -1196,17 +1235,9 @@ export class Director {
     parts.add(floor, ...posts, roof);
     parts.traverse((o) => (o.castShadow = true));
     sheet.add(parts);
-    await this.tw.tween({
-      duration: 0.8,
-      ease: ease.outBack,
-      update: (k) => {
-        parts.scale.set(1, Math.max(k, 0.01), 1);
-        if (paper) {
-          paper.scale.set(3 - k, 4 - 1.6 * k, 0.2); // 3x4 sheet -> 2x2.4 board
-          paper.position.y = 2.6 - 0.8 * k;
-        }
-      },
-    });
+    const quad = sheet.getObjectByName('quad');
+    if (quad) quad.position.y = 0.3; // parked on the pavilion floor
+    await this.tw.tween({ duration: 0.8, ease: ease.outBack, update: (k) => parts.scale.set(1, Math.max(k, 0.01), 1) });
   }
 
   /** One more floor for the n-th unit: the roof lifts, the floor grows under it, and a green plate goes on its city-facing wall. */
@@ -1379,6 +1410,78 @@ export class Director {
     return office;
   }
 
+  /**
+   * SELinux relabel of a bind mount (:z / :Z): a fence goes up round the host path's house, its sign showing the
+   * type and MCS level its files now carry. :Z makes them private to the container (its MCS categories); :z shares
+   * them (`s0`, no categories). The label stays on the files after the container is gone; the next relabel changes
+   * the sign and the fence flashes.
+   */
+  private async labelHostPath(office: THREE.Group, m: Mount, level: string | undefined, container: string): Promise<void> {
+    const mcs = m.relabel === 'private' && level ? level : 's0';
+    const name = `SELinux container_file_t · ${mcs}`;
+    const detail = [
+      `system_u:object_r:container_file_t:${mcs}`,
+      m.relabel === 'private'
+        ? `:Z, private to ${container}: only a process with MCS categories ${mcs.replace(/^s0:/, '')} may read it`
+        : ':z, shared: every container may read it',
+    ].join('\n');
+    let fence = office.getObjectByName('selinux') as THREE.Group | undefined;
+    const fresh = !fence;
+    if (!fence) {
+      fence = this.makeSelinuxFence();
+      office.add(fence);
+    }
+    tag(fence, { key: `selinux:${m.source}`, kind: 'selinux label', name, detail });
+    const sign = fence.getObjectByName('sign');
+    if (sign instanceof CSS2DObject) sign.element.textContent = `container_file_t · ${mcs}`;
+    if (fresh) {
+      await this.tw.tween({ duration: 0.8, ease: ease.outBack, update: (k) => fence.scale.set(1, Math.max(k, 0.01), 1) });
+    } else {
+      const rail = fence.getObjectByName('rail');
+      if (rail instanceof THREE.Mesh) await this.flash(rail);
+    }
+  }
+
+  /** Fence round a host path's house (gap at the door), with a sign for its SELinux label. */
+  private makeSelinuxFence(): THREE.Group {
+    const fence = new THREE.Group();
+    fence.name = 'selinux';
+    const mat = new THREE.MeshStandardMaterial({ color: palette.selinux, flatShading: true });
+    const [west, east, north, south] = [-OFFICE.w / 2 - 1.5, OFFICE.w / 2 + 1.5, -OFFICE.d / 2 - 1, OFFICE.d / 2 + 0.6];
+    const door = 1.2; // half-width of the gap in front of the door
+    const post = new THREE.BoxGeometry(0.15, 1.4, 0.15);
+    const addPost = (x: number, z: number) => {
+      const p = new THREE.Mesh(post, mat);
+      p.position.set(x, 0.7, z);
+      fence.add(p);
+    };
+    const addRail = (x0: number, z0: number, x1: number, z1: number) => {
+      const len = Math.hypot(x1 - x0, z1 - z0);
+      for (const y of [0.55, 1.25]) {
+        const r = new THREE.Mesh(new THREE.BoxGeometry(x1 === x0 ? 0.08 : len, 0.08, x1 === x0 ? len : 0.08), mat);
+        r.position.set((x0 + x1) / 2, y, (z0 + z1) / 2);
+        r.name = 'rail';
+        fence.add(r);
+      }
+      const n = Math.max(1, Math.round(len));
+      for (let i = 0; i <= n; i++) addPost(x0 + ((x1 - x0) * i) / n, z0 + ((z1 - z0) * i) / n);
+    };
+    addRail(west, north, east, north);
+    addRail(west, north, west, south);
+    addRail(east, north, east, south);
+    addRail(west, south, -door, south);
+    addRail(door, south, east, south);
+    const plate = new THREE.Mesh(new THREE.BoxGeometry(1.6, 0.8, 0.06), mat);
+    plate.position.set(west + 1.2, 1.1, south + 0.06);
+    fence.add(plate);
+    const sign = makeLabel('', 'label');
+    sign.name = 'sign';
+    sign.position.set(west + 1.2, 2.3, south);
+    fence.add(sign);
+    fence.traverse((o) => (o.castShadow = true));
+    return fence;
+  }
+
   /** Scratch space (tmpfs) is a bin beside the factory and is demolished with it. */
   private addScratch(f: Factory, m: Mount, n: number): Promise<void> {
     const bin = this.mesh(palette.scratch);
@@ -1388,7 +1491,7 @@ export class Director {
     return this.rise(bin, new THREE.Vector3(1.4, 1.4, 1.4), 0);
   }
 
-  private async connectStorage(id: string, f: Factory, mounts: Mount[]): Promise<void> {
+  private async connectStorage(id: string, f: Factory, mounts: Mount[], selinuxLevel?: string): Promise<void> {
     const roof = new THREE.Vector3(f.slot.x, FACTORY_SIZE.y + 0.5, f.slot.z);
     let scratch = 0;
     await Promise.all(
@@ -1403,7 +1506,11 @@ export class Director {
           case 'bind': {
             const shed = await this.ensureHostPath(m.source);
             const to = shed.position.clone().setY(OFFICE.h + 1);
-            return this.arcs.connect(keys.container(id), keys.hostPath(m.source), roof, to, palette.hostPath);
+            await Promise.all([
+              this.arcs.connect(keys.container(id), keys.hostPath(m.source), roof, to, palette.hostPath),
+              ...(m.relabel ? [this.labelHostPath(shed, m, selinuxLevel, id)] : []),
+            ]);
+            return;
           }
           case 'tmpfs':
             return this.addScratch(f, m, scratch++);
@@ -1495,7 +1602,7 @@ export class Director {
     if (band) band.visible = true;
 
     const roof = new THREE.Vector3(slot.x, FACTORY_SIZE.y + 0.5, slot.z);
-    const links: Promise<void>[] = [this.deliverFeedback(e, factory), this.connectStorage(e.id, factory, e.mounts)];
+    const links: Promise<void>[] = [this.deliverFeedback(e, factory), this.connectStorage(e.id, factory, e.mounts, e.selinuxLevel)];
     const from = this.imageTop(e.image);
     if (from) links.push(this.arcs.connect(keys.image(e.image), keys.container(e.id), from, roof, imageColor(e.image)));
     const stand = e.compose ? this.composeStands.get(e.compose) : undefined;
@@ -1578,19 +1685,10 @@ export class Director {
       return;
     }
     const taken = await this.takeTruck(prefer);
-    const { truck, bay, stall } = taken;
+    const { truck, bay } = taken;
     const release = () => this.freeTruck(taken);
     const route = deployRoute(slot, bay);
-    const fromLot = stall ? lotToBayRoute(stall, bay) : undefined;
-    if (fromLot) {
-      // Out of the car park one at a time (they share its exit lane), to the loading bay, turned to face east.
-      const exit = await this.acquire('lot:exit');
-      const drive = this.ride(truck, fromLot, truckTime(fromLot));
-      await this.tw.tween({ duration: 1.2, update: () => {} });
-      exit();
-      await drive;
-      await this.turnTo(truck, 0, 0.6);
-    }
+    const fromLot = await this.toBay(taken);
     const bed = new THREE.Vector3(TRUCK_BED.x, TRUCK_BED.top + CARGO.h / 2, 0);
 
     // Load: the copy hops out of the warehouse row onto the flatbed.
@@ -1647,17 +1745,34 @@ export class Director {
       const back = [...route].reverse();
       await this.turnTo(truck, pathSampler(back).at(0).yaw, 0.5);
       await this.ride(truck, back, truckTime(back));
-      if (fromLot) {
-        // Back past the bay to its car park stall.
-        const home = [...fromLot].reverse();
-        await this.turnTo(truck, pathSampler(home).at(0).yaw, 0.5);
-        await this.ride(truck, home, truckTime(home));
-        await this.turnTo(truck, Math.PI, 0.5); // parked facing west again
-      } else {
-        await this.turnTo(truck, 0, 0.5); // parked facing east, ready for the next load
-      }
+      await this.parkFromBay(taken, fromLot);
       release();
     })();
+  }
+
+  /**
+   * A car park truck drives out (one at a time: they share the exit lane) to its loading bay and turns to face
+   * east. Returns its route, to drive back by; undefined for the city's own truck, already at its bay.
+   */
+  private async toBay(t: Truck): Promise<[number, number][] | undefined> {
+    if (!t.stall) return undefined;
+    const fromLot = lotToBayRoute(t.stall, t.bay);
+    const exit = await this.acquire('lot:exit');
+    const drive = this.ride(t.truck, fromLot, truckTime(fromLot));
+    await this.tw.tween({ duration: 1.2, update: () => {} });
+    exit();
+    await drive;
+    await this.turnTo(t.truck, 0, 0.6);
+    return fromLot;
+  }
+
+  /** Back at the bay: a car park truck drives back to its stall (facing west); the city's own parks facing east. */
+  private async parkFromBay(t: Truck, fromLot: [number, number][] | undefined): Promise<void> {
+    if (!fromLot) return this.turnTo(t.truck, 0, 0.5);
+    const home = [...fromLot].reverse();
+    await this.turnTo(t.truck, pathSampler(home).at(0).yaw, 0.5);
+    await this.ride(t.truck, home, truckTime(home));
+    await this.turnTo(t.truck, Math.PI, 0.5);
   }
 
   private async turnTo(obj: THREE.Object3D, yaw: number, duration: number): Promise<void> {
@@ -2004,6 +2119,206 @@ export class Director {
     );
   }
 
+  // --- OpenShift: kube generate and the freight train -----------------------
+
+  /**
+   * `podman kube generate`: the Pod YAML goes up as the timetable by the freight station, with an arc from each
+   * member container. Trucks take a copy of each member's container to the station; one at a time down the loading
+   * lane, the gantry crane lifts each onto a flatcar (the train shunts to bring the next empty car under it). Once
+   * all are aboard, a pod shell wraps them.
+   */
+  private async packPod(e: EventOf<'kube.generate'>): Promise<void> {
+    const board = await this.raiseTimetable(e);
+    const boardTop = board.position.clone().setY(TIMETABLE.bottom + TIMETABLE.h);
+    await Promise.all(
+      e.containers.map(async (c, i) => {
+        const f = this.factories.get(c.id);
+        if (f) void this.arcs.connect(keys.container(c.id), `kube:${e.pod}`, new THREE.Vector3(f.slot.x, FACTORY_SIZE.y + 0.5, f.slot.z), boardTop, palette.pod);
+        await this.whenImage(c.image);
+        const image = this.manifests.get(c.image);
+        const copy = this.makeShell(c.image);
+        const label = makeLabel(c.name);
+        label.position.y = CARGO.h / 2 + 1;
+        copy.add(label);
+        tag(copy, { key: `pod:${e.pod}:${c.name}`, kind: 'container', name: `${c.name} · in pod ${e.pod}` });
+        if (image) {
+          copy.position.copy(image.position);
+          copy.rotation.copy(image.rotation);
+        }
+        this.root.add(copy);
+        await this.truckToTrain(copy, i);
+      }),
+    );
+    await this.wrapPod(e.pod);
+  }
+
+  /** `oc apply`: the train leaves east along the railway, through the wall, and is gone at the end of the track. */
+  private async departTrain(e: EventOf<'kube.deploy'>): Promise<void> {
+    const train = this.scene.getObjectByName('train:freight');
+    const fl = freightLayout();
+    const board = this.timetables.get(e.pod);
+    const status = board?.getObjectByName('status');
+    if (status instanceof CSS2DObject) status.element.textContent = `pod/${e.pod} → ${e.cluster} · departing`;
+    if (train) {
+      const from = train.position.x;
+      const to = fl.track.to - (fl.train.loco + TRAIN.loco / 2) - 1;
+      await this.tw.tween({
+        duration: 10,
+        update: (k) => {
+          const x = from + (to - from) * k * k; // pulls away slowly, then gathers speed
+          const d = x - train.position.x;
+          train.position.x = x;
+          for (const o of this.trainLoad) o.position.x += d;
+        },
+      });
+      train.visible = false; // gone to the OpenShift metropolis
+    }
+    for (const o of this.trainLoad) this.dispose(o);
+    this.trainLoad = [];
+    if (status instanceof CSS2DObject) status.element.textContent = `pod/${e.pod} → ${e.cluster} · departed`;
+  }
+
+  /** Timetable board east of the freight station: the Pod YAML in departure-board colours. */
+  private async raiseTimetable(e: EventOf<'kube.generate'>): Promise<THREE.Group> {
+    this.timetables.get(e.pod)?.removeFromParent();
+    const at = timetableStand();
+    const board = new THREE.Group();
+    board.position.set(at.x, 0.3, at.z);
+    const post = new THREE.BoxGeometry(0.3, TIMETABLE.bottom + TIMETABLE.h, 0.3);
+    for (const x of [-TIMETABLE.w / 2 + 0.6, TIMETABLE.w / 2 - 0.6]) {
+      const p = new THREE.Mesh(post, new THREE.MeshStandardMaterial({ color: palette.tower, flatShading: true }));
+      p.position.set(x, (TIMETABLE.bottom + TIMETABLE.h) / 2, -0.25);
+      board.add(p);
+    }
+    const back = new THREE.MeshStandardMaterial({ color: 0x111827, flatShading: true });
+    const face = new THREE.MeshBasicMaterial({ map: timetableTexture(`pod/${e.pod} → OpenShift`, e.yaml) });
+    const panel = new THREE.Mesh(new THREE.BoxGeometry(TIMETABLE.w, TIMETABLE.h, 0.3), [back, back, back, back, face, back]); // YAML on the south face
+    panel.name = 'panel';
+    panel.position.y = TIMETABLE.bottom + TIMETABLE.h / 2;
+    const roof = new THREE.Mesh(new THREE.BoxGeometry(TIMETABLE.w + 0.6, 0.25, 1), new THREE.MeshStandardMaterial({ color: palette.pod, flatShading: true }));
+    roof.position.y = TIMETABLE.bottom + TIMETABLE.h + 0.15;
+    board.add(panel, roof);
+    const status = makeLabel(`pod/${e.pod} → OpenShift · boarding`, 'label district');
+    status.name = 'status';
+    status.position.y = TIMETABLE.bottom + TIMETABLE.h + 1.2;
+    board.add(status);
+    board.traverse((o) => (o.castShadow = true));
+    tag(board, { key: `kube:${e.pod}`, kind: 'pod', name: `Timetable · pod/${e.pod} (${e.path})`, detail: e.yaml.join('\n') });
+    this.root.add(board);
+    this.timetables.set(e.pod, board);
+    await this.popIn(board);
+    return board;
+  }
+
+  /**
+   * A truck takes `copy` to the freight station and the gantry crane loads it onto flatcar `car`. Trucks load at
+   * their bays and go down the loading lane one at a time; once the crane has the container, the truck drives on
+   * round the loop (back to its bay, or into the car park) and the next can come down the lane.
+   */
+  private async truckToTrain(copy: THREE.Group, car: number): Promise<void> {
+    if (!this.mainTruck()) return this.craneToTrain(copy, car); // no city (tests)
+    const taken = await this.takeTruck(car === 0 ? 'bay' : 'lot');
+    const { truck, bay, stall } = taken;
+    await this.toBay(taken);
+    const bed = new THREE.Vector3(TRUCK_BED.x, TRUCK_BED.top + CARGO.h / 2, 0);
+    await this.placeOn(copy, truck.localToWorld(bed.clone()), truck.rotation.y, 1);
+    truck.attach(copy);
+    copy.position.copy(bed);
+    copy.rotation.set(0, 0, 0);
+    const lane = await this.acquire('freight:lane');
+    const route = bayToFreightRoute(bay);
+    await this.ride(truck, route, truckTime(route));
+    await this.craneToTrain(copy, car, () => {
+      void (async () => {
+        const onward = stall ? freightToLotRoute(stall) : freightToBayRoute(bay);
+        const drive = this.ride(truck, onward, truckTime(onward));
+        await this.tw.tween({ duration: 1.5, update: () => {} }); // clear of the crane: the lane is free
+        lane();
+        await drive;
+        await this.turnTo(truck, stall ? Math.PI : 0, 0.5); // parked: west in its stall, east at its bay
+        this.freeTruck(taken);
+      })();
+    });
+  }
+
+  /**
+   * The gantry crane lifts `copy` off the truck under it (then calls `lifted`, so the truck can go) and sets it on
+   * flatcar `car`, shunted under the crane meanwhile. One container at a time.
+   */
+  private async craneToTrain(copy: THREE.Group, car: number, lifted?: () => void): Promise<void> {
+    const release = await this.acquire('crane:freight');
+    const fl = freightLayout();
+    const crane = this.scene.getObjectByName('crane:freight');
+    const trolley = crane?.getObjectByName('trolley');
+    const hoist = trolley?.getObjectByName('hoist');
+    const shunt = this.shuntTo(car);
+    if (trolley && hoist) {
+      const hook = hoist.getObjectByName('hook')!;
+      const beam = 0.3 + FREIGHT_GANTRY_HEIGHT; // world height of the trolley
+      await this.trolleyTo(trolley, fl.loadZ - fl.crane.z, 0.8);
+      const top = copy.getWorldPosition(new THREE.Vector3()).y + CARGO.h / 2;
+      await this.hoistTo(hoist, beam - top, 1);
+      hook.attach(copy);
+      await this.hoistTo(hoist, HOIST_REST, 1);
+      lifted?.();
+      await shunt;
+      await this.trolleyTo(trolley, fl.railZ - fl.crane.z, 1.4);
+      await this.hoistTo(hoist, beam - (FLATCAR_DECK + CARGO.h), 1);
+      this.root.attach(copy);
+      void this.hoistTo(hoist, HOIST_REST, 0.8);
+    } else {
+      lifted?.();
+      await shunt;
+    }
+    copy.position.set(fl.crane.x, FLATCAR_DECK + CARGO.h / 2, fl.railZ);
+    copy.rotation.set(0, 0, 0);
+    this.trainLoad.push(copy);
+    release();
+  }
+
+  private async trolleyTo(trolley: THREE.Object3D, z: number, duration: number): Promise<void> {
+    const from = trolley.position.z;
+    await this.tw.tween({ duration, update: (k) => (trolley.position.z = from + (z - from) * k) });
+  }
+
+  /** Move the train (and what is on it) so flatcar `car` stands under the gantry crane. */
+  private async shuntTo(car: number): Promise<void> {
+    const train = this.scene.getObjectByName('train:freight');
+    const fl = freightLayout();
+    const target = fl.crane.x - fl.train.cars[car]!;
+    if (!train || train.position.x === target) return;
+    const from = train.position.x;
+    await this.tw.tween({
+      duration: 1.5,
+      update: (k) => {
+        const x = from + (target - from) * (k * k * (3 - 2 * k));
+        const d = x - train.position.x;
+        train.position.x = x;
+        for (const o of this.trainLoad) o.position.x += d;
+      },
+    });
+  }
+
+  /** The containers on the train become one pod: a translucent teal shell rises round them, labelled with the pod. */
+  private async wrapPod(pod: string): Promise<void> {
+    const loads = this.trainLoad.filter((o) => o.userData.entity?.kind === 'container');
+    if (!loads.length) return;
+    const xs = loads.map((o) => o.position.x);
+    const fl = freightLayout();
+    const shell = new THREE.Mesh(
+      new THREE.BoxGeometry(Math.max(...xs) - Math.min(...xs) + CARGO.l + 0.8, CARGO.h + 0.6, CARGO.w + 0.8),
+      new THREE.MeshStandardMaterial({ color: palette.pod, transparent: true, opacity: 0.3, depthWrite: false }),
+    );
+    shell.position.set((Math.max(...xs) + Math.min(...xs)) / 2, FLATCAR_DECK + (CARGO.h + 0.6) / 2, fl.railZ);
+    const label = makeLabel(`pod/${pod}`, 'label district');
+    label.position.y = CARGO.h / 2 + 2.2;
+    shell.add(label);
+    tag(shell, { key: `kube:${pod}`, kind: 'pod', name: `pod/${pod} · ${loads.length} containers` });
+    this.root.add(shell);
+    this.trainLoad.push(shell);
+    await this.tw.tween({ duration: 0.8, ease: ease.outBack, update: (k) => shell.scale.set(1, Math.max(k, 0.01), 1) });
+  }
+
   // --- Helpers --------------------------------------------------------------
 
   /** One mesh per feeder; its segments share the material. */
@@ -2084,13 +2399,43 @@ export class Director {
     obj.removeFromParent();
     obj.traverse((o) => {
       if (o instanceof THREE.Mesh) {
-        (o.material as THREE.Material).dispose();
+        for (const m of (Array.isArray(o.material) ? o.material : [o.material]) as THREE.Material[]) {
+          if ('map' in m && m.map instanceof THREE.Texture) m.map.dispose(); // e.g. the timetable's painted face
+          m.dispose();
+        }
         if (o.geometry !== this.box) o.geometry.dispose();
       }
       // CSS2DObject elements stay in the DOM unless removed explicitly.
       if ('element' in o && o.element instanceof HTMLElement) o.element.remove();
     });
   }
+}
+
+/** The departure board's face: a header and the Pod YAML in amber monospace on black, sized to the panel. */
+function timetableTexture(header: string, yaml: string[]): THREE.Texture {
+  const canvas = document.createElement('canvas');
+  canvas.width = 1024;
+  canvas.height = Math.round((1024 * TIMETABLE.h) / TIMETABLE.w);
+  const ctx = canvas.getContext('2d');
+  if (ctx) {
+    ctx.fillStyle = '#111827';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    const line = Math.min(40, (canvas.height - 110) / yaml.length);
+    ctx.fillStyle = '#fbbf24';
+    ctx.font = 'bold 44px ui-monospace, monospace';
+    ctx.fillText(header, 36, 64);
+    ctx.fillRect(36, 84, canvas.width - 72, 3);
+    ctx.font = `${Math.floor(line * 0.68)}px ui-monospace, monospace`;
+    yaml.forEach((l, i) => ctx.fillText(l, 36, 128 + i * line, canvas.width - 72));
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  return texture;
+}
+
+/** Where a quadlet's arcs attach: above the quad bike, or on its pavilion's roof once it has one. */
+function quadletTop(quadlet: THREE.Object3D): THREE.Vector3 {
+  return quadlet.position.clone().setY(quadlet.getObjectByName('pavilion') ? 5 : 2.6);
 }
 
 /** Seconds the deploy truck takes for a pickup leg: about 20 m/s, so long detours are not rushed. */

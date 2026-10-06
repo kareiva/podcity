@@ -16,11 +16,11 @@ export const districts = {
   rnd: { x: -45, z: -46, w: 22, d: 14 }, // R&D department: writes Containerfiles, builds images
   quadlet: { x: -54, z: 28, w: 16, d: 12 }, // Quadlet department: writes unit files for systemd
   factories: { x: 10, z: -10, w: 60, d: 40 },
-  lockers: { x: 36, z: 30, w: 30, d: 16 }, // secured yard, fenced; next to the freight station
+  lockers: { x: 36, z: 30, w: 30, d: 16 }, // secured yard, fenced
   businessCenter: { x: -48, z: 87, w: 12, d: 12 }, // systemd: host side, outside the wall, on the host highway's north roadside
   shoppingCenter: { x: -34, z: 30, w: 14, d: 10 }, // demo entry point, next to the Quadlet department, clear of the port bridges south
   secrets: { x: 10, z: -41, w: 7, d: 8 }, // Secret Facility: behind (north of) the factory hall, off the road network; door faces the hall
-  freight: { x: 65, z: 45, w: 20, d: 20 },
+  freight: { x: 8, z: 53, w: 28, d: 16 }, // freight station: south of the car park; its railway leaves through the east wall
   hostLand: { x: 0, z: 100, w: 140, d: 12 }, // host filesystem: a highway beyond the wall
 } satisfies Record<string, Pad>;
 
@@ -216,14 +216,30 @@ export function serviceGate(): { x: number; z: number } {
   return { x, z: wallZ(x) };
 }
 
-/** z where the wall crosses a north-south line at x (south side). */
-export function wallZ(x: number): number {
-  return Math.sqrt(Math.max(CITY_RADIUS ** 2 - x ** 2, 0));
+/**
+ * The factory wall round the city: straight sides, 3 m high. The west side stands where the old round perimeter
+ * reached (CITY_RADIUS from the centre); the north side runs right behind the R&D Department, the east side just past
+ * the Locker Yard (with the railway portal), and the south side straight between the city and the host highway, with
+ * a gate where the service road passes through (the visitor bridge passes over it).
+ */
+export const CITY_WALL = {
+  west: -CITY_RADIUS,
+  east: districts.lockers.x + districts.lockers.w / 2 + 4,
+  north: districts.rnd.z - districts.rnd.d / 2 - 2,
+  south: 76,
+  height: 3,
+  thickness: 0.8,
+};
+
+/** Whether a ground point lies inside the wall, at least `margin` from it. */
+export function insideWall(x: number, z: number, margin = 0): boolean {
+  const w = CITY_WALL;
+  return x > w.west + margin && x < w.east - margin && z > w.north + margin && z < w.south - margin;
 }
 
-/** x where the wall crosses an east-west line at z (west side). */
-export function wallXWest(z: number): number {
-  return -Math.sqrt(Math.max(CITY_RADIUS ** 2 - z ** 2, 0));
+/** z where a north-south line at x crosses the (south) wall. */
+export function wallZ(_x: number): number {
+  return CITY_WALL.south;
 }
 
 const SLOT_COLS = 5;
@@ -380,7 +396,9 @@ export function lotToBayRoute(stall: { x: number; z: number }, bay: { x: number;
  * Roads under the deploy truck's routes (the routes above, straightened): the pickup lane in front of the
  * Environmental Shopping Center, the corridor north between the warehouse and the factories, the strip
  * behind the factory hall to the Secret Facility, the apron of the truck bays with its spur and link to the
- * corridor, the lane in front of the first row of plots, and the car park's exit lane to the corridor.
+ * corridor, the lane in front of the first row of plots, the car park's exit lane to the corridor, the corridor's
+ * extension south to the freight station's loading lane, and the loop from its east end round the car park back to the
+ * corridor, with a spur into the car park.
  * Published-port footbridges cross over them.
  */
 export function truckRoads(): { points: [number, number][]; width: number }[] {
@@ -390,6 +408,7 @@ export function truckRoads(): { points: [number, number][]; width: number }[] {
   const bayZ = bays.map((b) => b.z);
   const lane = deployLaneZ(factorySlot(0));
   const lastPlot = factorySlot(SLOT_COLS - 1);
+  const freight = freightLayout();
   return [
     { points: [[shop.x, shop.z], [TRUCK_CORRIDOR_X, shop.z], [TRUCK_CORRIDOR_X, secret.z], [secret.x, secret.z]], width: 4 },
     { points: [[truckBay.x, Math.min(...bayZ) - 1.5], [truckBay.x, Math.max(...bayZ) + 1.5]], width: 8 }, // bay apron, trucks park across it
@@ -397,6 +416,8 @@ export function truckRoads(): { points: [number, number][]; width: number }[] {
     { points: [[TRUCK_CORRIDOR_X, lane], [lastPlot.x, lane]], width: 3 }, // fits the gap in front of the plot row
     { points: [[parkingLot.x - parkingLot.w / 2, parkingLot.z], [TRUCK_CORRIDOR_X, parkingLot.z]], width: 4 }, // car park exit
     { points: [[BAY_LINK_X, Math.min(...bayZ) - 1.5], [BAY_LINK_X, Math.max(...bayZ) + 1.5]], width: 3 }, // bays <-> corridor link
+    { points: [[TRUCK_CORRIDOR_X, shop.z], [TRUCK_CORRIDOR_X, freight.loadZ], [FREIGHT_LOOP_X, freight.loadZ], [FREIGHT_LOOP_X, FREIGHT_LOOP_Z], [TRUCK_CORRIDOR_X, FREIGHT_LOOP_Z]], width: 4 }, // freight loading lane and loop
+    { points: [[FREIGHT_LOOP_X, parkingLot.z], [parkingLot.x + parkingLot.w / 2, parkingLot.z]], width: 4 }, // loop -> car park spur
   ];
 }
 
@@ -420,6 +441,106 @@ export function stopToPlotRoute(stop: { x: number; z: number }, factory: { x: nu
     [TRUCK_CORRIDOR_X, lane],
     [factory.x, lane],
   ]);
+}
+
+/** Freight train: a flatcar carries one 20ft container; the locomotive is a bit shorter. */
+export const TRAIN = { car: ISO_20FT.l + 1.2, loco: 6, gauge: 1.5 };
+
+/**
+ * Freight station south of the car park: trucks come down the corridor and along the loading lane on its north
+ * side; a gantry crane spans the lane and the track on its south side and loads containers onto the waiting train,
+ * which leaves east along the railway, through a portal in the wall, towards the OpenShift metropolis.
+ */
+export function freightLayout(): {
+  loadZ: number; // loading lane, under the crane
+  railZ: number; // track
+  crane: { x: number; z: number; span: number }; // gantry centre (over the middle flatcar) and its span (north-south)
+  train: { loco: number; cars: number[] }; // x of the waiting train's locomotive (east end) and of each flatcar
+  track: { from: number; to: number }; // x of the buffer stop (west) and where the rails run off the ground (east)
+  portal: { x: number; z: number }; // where the railway passes through the east wall
+} {
+  const f = districts.freight;
+  const loadZ = f.z - 3;
+  const railZ = f.z + 4;
+  const groundEdge = Math.sqrt((CITY_RADIUS + 50) ** 2 - railZ ** 2);
+  const buffer = f.x - f.w / 2 + 1.5;
+  // Three flatcars from just east of the buffer stop, the locomotive at the east end, facing the exit.
+  const cars = [0, 1, 2].map((i) => buffer + 0.5 + TRAIN.car / 2 + i * TRAIN.car);
+  const crane = { x: cars[1]!, z: (loadZ + railZ) / 2 - 0.25, span: railZ - loadZ + 5.5 };
+  return {
+    loadZ,
+    railZ,
+    crane,
+    train: { loco: cars.at(-1)! + TRAIN.car / 2 + TRAIN.loco / 2, cars },
+    track: { from: buffer, to: groundEdge - 4 },
+    portal: { x: CITY_WALL.east, z: railZ },
+  };
+}
+
+/** Timetable board by the freight station: east of it, beside the end of the loading lane, facing south. */
+export function timetableStand(): { x: number; z: number } {
+  const f = districts.freight;
+  return { x: f.x + f.w / 2 + 5, z: f.z - 3 };
+}
+
+/**
+ * The freight loop: past the crane the loading lane carries on east, then north up the car park's east side
+ * (with a spur west into the car park) and west along the gap between the factory hall and the car park (between
+ * two visitor bridge piers) back to the corridor. Trucks drive on round it after unloading, so the next can come
+ * down the lane at once.
+ */
+const FREIGHT_LOOP_X = parkingLot.x + parkingLot.w / 2 + 7;
+const FREIGHT_LOOP_Z = districts.factories.z + districts.factories.d / 2 + 8;
+
+/** After unloading at the crane: round the loop and up the corridor back to the loading bay (arriving facing west). */
+export function freightToBayRoute(bay: { x: number; z: number }): [number, number][] {
+  const fl = freightLayout();
+  return roundedPath([
+    [fl.crane.x, fl.loadZ],
+    [FREIGHT_LOOP_X, fl.loadZ],
+    [FREIGHT_LOOP_X, FREIGHT_LOOP_Z],
+    [TRUCK_CORRIDOR_X, FREIGHT_LOOP_Z],
+    [TRUCK_CORRIDOR_X, bay.z],
+    [bay.x, bay.z],
+  ]);
+}
+
+/** After unloading at the crane: up the loop and in by the car park's east spur to its stall (arriving facing west). */
+export function freightToLotRoute(stall: { x: number; z: number }): [number, number][] {
+  const fl = freightLayout();
+  return roundedPath([
+    [fl.crane.x, fl.loadZ],
+    [FREIGHT_LOOP_X, fl.loadZ],
+    [FREIGHT_LOOP_X, parkingLot.z],
+    [parkingLot.x + parkingLot.w / 2, parkingLot.z],
+    [stall.x, stall.z],
+  ]);
+}
+
+/** Truck route from a loading bay east to the corridor, south down it and east along the freight loading lane to the crane. */
+export function bayToFreightRoute(bay: { x: number; z: number }): [number, number][] {
+  const fl = freightLayout();
+  return roundedPath([
+    [bay.x, bay.z],
+    [TRUCK_CORRIDOR_X, bay.z],
+    [TRUCK_CORRIDOR_X, fl.loadZ],
+    [fl.crane.x, fl.loadZ],
+  ]);
+}
+
+/** Gate pillars are 1.4 m wide each side of the opening. */
+const GATE_PILLAR = 1.4;
+
+/**
+ * Openings in the wall, each the width of what passes through plus its gate's pillars: on the south side the
+ * service road's gate; on the east side the railway portal. The wall stays closed under the visitor bridge, whose
+ * deck passes over it through its port gate.
+ */
+export function wallGates(): { side: 'south' | 'east'; at: number; width: number }[] {
+  return [
+    { side: 'south', at: serviceGate().x, width: 4 + 2 * GATE_PILLAR },
+    { side: 'east', at: freightLayout().railZ, width: TRAIN.gauge + 2.6 + 2 * GATE_PILLAR },
+  ];
 }
 
 /** Conveyor belt of the n-th network, running east-west along the north edge of the factory district. */

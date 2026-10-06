@@ -6,7 +6,7 @@ export interface ScheduledEvent {
   event: SimEvent;
 }
 
-export type StepId = 'pull' | 'network' | 'deploy' | 'env' | 'expose' | 'storage' | 'migrate' | 'metrics' | 'build' | 'compose' | 'quadlet';
+export type StepId = 'pull' | 'network' | 'deploy' | 'env' | 'expose' | 'storage' | 'migrate' | 'metrics' | 'build' | 'compose' | 'quadlet' | 'openshift';
 
 export interface Step {
   id: StepId;
@@ -39,10 +39,20 @@ export function defaultSteps(seed = 42): Step[] {
   const nginxLayers: Digest[] = [ubiBase, s2iCore, shortDigest(rng)];
   const postgresLayers: Digest[] = [ubiBase, s2iCore, shortDigest(rng), shortDigest(rng)];
 
+  // :Z relabels the site for each web container: container_file_t with that container's MCS categories,
+  // so no other container can read it. Podman picks the categories at create; seeded here.
+  const mcsRng = createRng(seed ^ 0x5e11);
+  const mcsLevel = (): string => {
+    const a = Math.floor(mcsRng() * 1024);
+    const b = (a + 1 + Math.floor(mcsRng() * 1023)) % 1024;
+    return `s0:c${Math.min(a, b)},c${Math.max(a, b)}`;
+  };
   const webMounts: Mount[] = [
-    { kind: 'bind', source: '/home/user/site', target: '/opt/app-root/src', readOnly: true },
+    { kind: 'bind', source: '/home/user/site', target: '/opt/app-root/src', readOnly: true, relabel: 'private' },
     { kind: 'tmpfs', source: 'tmpfs', target: '/var/lib/nginx/tmp' },
   ];
+  const web3Level = mcsLevel(); // storage step
+  const web4Level = mcsLevel(); // compose
   const webPort: Port = { host: 8080, container: 8080, protocol: 'tcp' };
   const dbMounts: Mount[] = [{ kind: 'volume', source: 'pgdata', target: '/var/lib/pgsql/data' }];
   const dbEnv: EnvVar[] = [
@@ -97,7 +107,7 @@ export function defaultSteps(seed = 42): Step[] {
     '    networks: [backend]',
     '    depends_on: [db]',
     '    ports: ["8080:8080"]',
-    '    volumes: [/home/user/site:/opt/app-root/src:ro]',
+    '    volumes: [/home/user/site:/opt/app-root/src:ro,Z]',
     '    tmpfs: [/var/lib/nginx/tmp]',
     '  metrics:',
     '    image: registry.access.redhat.com/ubi9/ubi:latest',
@@ -124,7 +134,7 @@ export function defaultSteps(seed = 42): Step[] {
       create: { type: 'container.create', id: 'metrics-2', name: 'metrics-collector', image: UBI, mounts: [], env: [], restart: 'always', command: metricsCommand, runFor: METRICS_EVERY, compose: PROJECT, dependsOn: ['db'] },
       ports: [],
     },
-    { old: 'web-3', create: { type: 'container.create', id: 'web-4', name: 'web', image: NGINX, mounts: webMounts, env: [], compose: PROJECT, dependsOn: ['db'] }, ports: [webPort] },
+    { old: 'web-3', create: { type: 'container.create', id: 'web-4', name: 'web', image: NGINX, mounts: webMounts, env: [], compose: PROJECT, dependsOn: ['db'], selinuxLevel: web4Level }, ports: [webPort] },
   ];
 
   // Quadlets for the final city: the same settings podman run used, as unit files systemd can start at boot.
@@ -147,7 +157,7 @@ export function defaultSteps(seed = 42): Step[] {
         `Image=${NGINX}`,
         'ContainerName=web',
         'PublishPort=8080:8080',
-        'Volume=/home/user/site:/opt/app-root/src:ro',
+        'Volume=/home/user/site:/opt/app-root/src:ro,Z',
         'Tmpfs=/var/lib/nginx/tmp',
       ]),
     },
@@ -168,6 +178,28 @@ export function defaultSteps(seed = 42): Step[] {
         `Secret=${PG_SECRET},type=env,target=POSTGRESQL_PASSWORD`,
       ]),
     },
+  ];
+
+  // OpenShift: the web and podcity-api containers as one Kubernetes Pod (podman kube generate), shipped to the cluster.
+  const podMembers = [
+    { id: 'web-4', name: 'web', image: NGINX },
+    { id: 'api-2', name: 'podcity-api', image: CUSTOM },
+  ];
+  const podYaml = [
+    'apiVersion: v1',
+    'kind: Pod',
+    'metadata:',
+    '  name: podcity',
+    '  labels: { app: podcity }',
+    'spec:',
+    '  containers:',
+    '  - name: web',
+    `    image: ${NGINX}`,
+    '    ports:',
+    '    - containerPort: 8080',
+    '      hostPort: 8080',
+    '  - name: podcity-api',
+    `    image: ${CUSTOM}`,
   ];
 
   return [
@@ -217,10 +249,10 @@ export function defaultSteps(seed = 42): Step[] {
       at(0.3, { type: 'network.connect', container: 'web-2', network: NET, ports: [webPort] });
     }),
 
-    step('storage', 'Storage', 'Three kinds of storage: a named volume, a host path, and tmpfs scratch space. Mounts are set at create time, so both containers are re-created, keeping their env, port and network.', (at) => {
+    step('storage', 'Storage', 'Three kinds of storage: a named volume, a host path, and tmpfs scratch space. Mounts are set at create time, so both containers are re-created, keeping their env, port and network. The site is mounted with :Z, so SELinux relabels it for web alone: a fence round its house shows the label, container_file_t with web\'s MCS categories.', (at) => {
       at(0, { type: 'volume.create', name: 'pgdata' });
       at(1.5, { type: 'container.remove', id: 'web-2' });
-      at(0.5, { type: 'container.create', id: 'web-3', name: 'web', image: NGINX, mounts: webMounts, env: [] });
+      at(0.5, { type: 'container.create', id: 'web-3', name: 'web', image: NGINX, mounts: webMounts, env: [], selinuxLevel: web3Level });
       at(2.5, { type: 'container.start', id: 'web-3' });
       at(0.3, { type: 'network.connect', container: 'web-3', network: NET, ports: [webPort] });
       at(1.5, { type: 'container.remove', id: 'db-2' });
@@ -295,6 +327,11 @@ export function defaultSteps(seed = 42): Step[] {
         at(i === 0 ? 0 : 1.5, { type: 'quadlet.create', file: q.file, path: `~/.config/containers/systemd/${q.file}`, image: q.image, lines: q.lines }),
       );
       at(2, { type: 'systemd.daemon-reload', generated: quadlets.map((q) => ({ quadlet: q.file, unit: q.file.replace(/\.container$/, '.service') })) });
+    }),
+
+    step('openshift', 'OpenShift', 'podman kube generate turns the running web and podcity-api containers into one Kubernetes Pod YAML, posted as the timetable next to the freight station. Two trucks take copies of the containers to the station, the crane loads them onto the train, where they form the pod, and oc apply sends the train east out of the city to the OpenShift metropolis.', (at) => {
+      at(0, { type: 'kube.generate', pod: 'podcity', path: '~/podcity/podcity-pod.yaml', containers: podMembers, yaml: podYaml });
+      at(20, { type: 'kube.deploy', pod: 'podcity', path: '~/podcity/podcity-pod.yaml', cluster: 'OpenShift' });
     }),
   ];
 }

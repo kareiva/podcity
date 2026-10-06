@@ -39,6 +39,14 @@ export interface NetworkState {
   subnet: string;
 }
 
+/** A Pod YAML from `podman kube generate`, and whether it has been deployed to the cluster. */
+export interface KubeState {
+  pod: string;
+  path: string;
+  containers: string[];
+  deployedTo?: string;
+}
+
 export interface QuadletState {
   file: string; // e.g. web.container
   path: string;
@@ -62,6 +70,7 @@ export interface PodmanState {
   quadlets: Map<string, QuadletState>;
   compose: Map<string, ComposeState>;
   pods: Map<string, PodState>;
+  kube: Map<string, KubeState>; // generated Pod YAMLs, by pod name
 }
 
 export function createState(): PodmanState {
@@ -75,6 +84,7 @@ export function createState(): PodmanState {
     quadlets: new Map(),
     compose: new Map(),
     pods: new Map(),
+    kube: new Map(),
   };
 }
 
@@ -197,8 +207,15 @@ export function applyEvent(state: PodmanState, e: SimEvent): void {
     case 'pod.create':
       state.pods.set(e.id, { id: e.id, name: e.name, members: [] });
       break;
-    case 'network.request':
     case 'kube.generate':
+      state.kube.set(e.pod, { pod: e.pod, path: e.path, containers: e.containers.map((c) => c.id) });
+      break;
+    case 'kube.deploy': {
+      const k = state.kube.get(e.pod);
+      if (k) k.deployedTo = e.cluster;
+      break;
+    }
+    case 'network.request':
     case 'resource.sample':
       break;
   }

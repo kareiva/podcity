@@ -23,6 +23,7 @@ export const palette = {
   marking: 0xf5f5f5, // road lane markings
   shipHull: 0x1f2a44,
   blueprint: 0x1e40af, // compose blueprint board
+  selinux: 0xdb2777, // SELinux label fences
 } as const;
 
 /**

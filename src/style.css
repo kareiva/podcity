@@ -42,13 +42,6 @@ html, body {
   white-space: nowrap;
 }
 
-.label.containerfile {
-  font-family: ui-monospace, monospace;
-  font-size: 10px;
-  white-space: pre;
-  text-align: left;
-}
-
 .label.district {
   font-weight: 600;
   font-size: 12px;

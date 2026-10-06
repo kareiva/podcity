@@ -53,6 +53,8 @@ describe('Director fast-forward', () => {
     expect(k.get('volume')).toEqual(['vol:pgdata']);
     expect(k.get('host path')?.sort()).toEqual(['host:/home/user/migrations', 'host:/home/user/site']); // sheds outlive the one-off
     expect(k.get('scratch')).toHaveLength(1);
+    expect(k.get('selinux label')).toEqual(['selinux:/home/user/site']); // :Z on the site only
+    expect(k.get('pod')).toEqual(['kube:podcity']); // the timetable stays; the train left with the pod and its containers
     expect(new Set(k.get('port'))).toHaveProperty('size', 1); // gate and visitor bridge are one published port
     expect(k.get('secret')?.sort()).toEqual(['env:db-4:POSTGRESQL_PASSWORD', 'secret:pgpass']); // sealed card + the secret itself
     expect(k.get('env var')).toHaveLength(2);
@@ -74,7 +76,8 @@ describe('Director fast-forward', () => {
       const info = o.userData.entity as { kind: string; detail?: string } | undefined;
       if (info?.kind !== 'quadlet') return;
       expect(o.position.z).toBeGreaterThan(80); // in a pavilion beside the systemd tower
-      expect(o.getObjectByName('paper')).toBeDefined();
+      expect(o.getObjectByName('quad')).toBeDefined(); // the quad bike, parked in its pavilion
+      expect(o.getObjectByName('pavilion')).toBeDefined();
       expect(info.detail).toMatch(/\[Container\]\nImage=/);
     });
     expect(k.get('systemd')?.sort()).toEqual(['unit:api.service', 'unit:api.service', 'unit:db.service', 'unit:db.service', 'unit:web.service', 'unit:web.service']); // a tower floor and its plate each // the static tower is not part of the director's scene

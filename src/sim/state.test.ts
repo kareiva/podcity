@@ -179,6 +179,31 @@ describe('default steps', () => {
     expect(events.findIndex((e) => e === creates[1])).toBeGreaterThan(dbStart);
   });
 
+  it('relabels the site privately (:Z) for each web container, with its own MCS categories', () => {
+    const steps = defaultSteps();
+    const webs = steps.flatMap((st) => st.events.map((e) => e.event)).filter((e): e is Extract<typeof e, { type: 'container.create' }> => e.type === 'container.create' && e.mounts.some((m) => m.source === '/home/user/site'));
+    expect(webs.map((w) => w.id)).toEqual(['web-3', 'web-4']);
+    for (const w of webs) {
+      expect(w.mounts.find((m) => m.source === '/home/user/site')).toMatchObject({ readOnly: true, relabel: 'private' });
+      expect(w.selinuxLevel).toMatch(/^s0:c\d+,c\d+$/);
+    }
+    expect(webs[0]!.selinuxLevel).not.toBe(webs[1]!.selinuxLevel);
+  });
+
+  it('ends by generating a Pod YAML from web and podcity-api and deploying it to OpenShift', () => {
+    const steps = defaultSteps();
+    expect(steps.at(-1)!.id).toBe('openshift');
+    const sim = new Simulator(new EventBus(), steps);
+    sim.fastForward(steps.length);
+    const kube = sim.state.kube.get('podcity')!;
+    expect(kube.containers).toEqual(['web-4', 'api-2']);
+    for (const id of kube.containers) expect(sim.state.containers.get(id)?.status).toBe('running'); // generated from running containers
+    expect(kube.deployedTo).toBe('OpenShift');
+    const gen = steps.at(-1)!.events.find((e) => e.event.type === 'kube.generate')!.event as Extract<SimEvent, { type: 'kube.generate' }>;
+    expect(gen.yaml).toContain('kind: Pod');
+    expect(gen.yaml.filter((l) => l.startsWith('  - name: '))).toEqual(['  - name: web', '  - name: podcity-api']);
+  });
+
   it('puts --network and -p on the create in the expose step, as podman takes them at create time', () => {
     const expose = defaultSteps().find((s) => s.id === 'expose')!.events.map((e) => e.event);
     expect(expose.find((e) => e.type === 'container.create')).toMatchObject({
