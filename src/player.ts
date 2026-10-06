@@ -5,6 +5,10 @@ import type { Simulator } from './sim/simulator';
 
 /** Pause between steps when autoplaying, in simulation seconds. */
 const STEP_PAUSE = 2;
+/** With loop on: how long the last step keeps running before the city fades, in simulation seconds. */
+const LOOP_PAUSE = 15;
+/** Fade-out of all created objects before the loop starts over, in simulation seconds. */
+const LOOP_FADE = 2;
 
 /**
  * Plays the simulation step by step. Any step can be replayed on its own:
@@ -13,9 +17,13 @@ const STEP_PAUSE = 2;
  */
 export class Player {
   autoplay = true;
+  /** After the last step, fade everything out and start again from step 1 (needs autoplay). */
+  loop = false;
   private seeking = false;
   private doneAt: number | null = null;
   private listeners = new Set<() => void>();
+  /** Called when the loop starts over, before step 1 is replayed. */
+  onLoop: () => void = () => {};
 
   constructor(
     private readonly sim: Simulator,
@@ -70,7 +78,18 @@ export class Player {
       this.doneAt = null;
       this.sim.begin(next, now);
       this.notify();
+    } else if (this.autoplay && this.loop && next >= this.steps.length && now - this.doneAt >= LOOP_PAUSE) {
+      void this.restart();
     }
+  }
+
+  /** Fade out every created object, then replay from step 1. */
+  private async restart(): Promise<void> {
+    this.seeking = true;
+    await this.director.fadeOut(LOOP_FADE);
+    this.seeking = false;
+    this.onLoop();
+    await this.goTo(0);
   }
 
   private notify(): void {

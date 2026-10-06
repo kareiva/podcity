@@ -22,6 +22,7 @@ export const palette = {
   bars: 0x374151,
   marking: 0xf5f5f5, // road lane markings
   shipHull: 0x1f2a44,
+  blueprint: 0x1e40af, // compose blueprint board
 } as const;
 
 /**

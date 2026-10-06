@@ -47,6 +47,7 @@ export type SimEvent =
       command?: string;
       restart?: 'always';
       runFor?: number;
+      compose?: string; // compose project that (re)created it
     }
   // restart: started again by its restart policy rather than by `podman start`
   | { type: 'container.start'; id: string; restart?: boolean }
@@ -63,6 +64,8 @@ export type SimEvent =
   // Quadlet: a unit file under ~/.config/containers/systemd; on daemon-reload systemd's generator turns it into a .service
   | { type: 'quadlet.create'; file: string; path: string; image: string; lines: string[] }
   | { type: 'systemd.daemon-reload'; generated: { quadlet: string; unit: string }[] }
+  // podman compose up: the stack described in a compose file; its containers follow as container.* events tagged with the project
+  | { type: 'compose.up'; project: string; path: string; lines: string[]; services: string[] }
   | { type: 'pod.create'; id: string; name: string }
   | { type: 'kube.generate'; pod: string }
   | { type: 'resource.sample'; id: string; cpu: number; mem: number; memLimit?: number };

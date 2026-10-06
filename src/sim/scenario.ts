@@ -6,7 +6,7 @@ export interface ScheduledEvent {
   event: SimEvent;
 }
 
-export type StepId = 'pull' | 'network' | 'deploy' | 'env' | 'migrate' | 'expose' | 'storage' | 'build' | 'quadlet' | 'metrics';
+export type StepId = 'pull' | 'network' | 'deploy' | 'env' | 'expose' | 'storage' | 'migrate' | 'metrics' | 'build' | 'compose' | 'quadlet';
 
 export interface Step {
   id: StepId;
@@ -22,7 +22,7 @@ const NGINX = 'registry.access.redhat.com/ubi9/nginx-124:latest';
 const POSTGRES = 'registry.access.redhat.com/ubi9/postgresql-16:latest';
 const NET = 'backend';
 const PG_SECRET = 'pgpass';
-const CUSTOM = 'localhost/podcity-web:1.0';
+const CUSTOM = 'localhost/podcity-api:1.0';
 const METRICS_EVERY = 10; // seconds the metrics collector runs before exiting and being restarted
 
 /**
@@ -67,17 +67,99 @@ export function defaultSteps(seed = 42): Step[] {
     { name: 'PGPASSWORD', value: '', secret: true, secretName: PG_SECRET },
   ];
 
-  const quadlet = [
+  // Compose: the whole stack in one file, with the settings the earlier steps built up by hand.
+  const metricsCommand = `sh -c 'curl -s http://web:8080/ >/dev/null; sleep ${METRICS_EVERY}'`;
+  const composeFile = [
+    'services:',
+    '  db:',
+    `    image: ${POSTGRES}`,
+    '    container_name: db',
+    '    networks: [backend]',
+    '    volumes: [pgdata:/var/lib/pgsql/data]',
+    '    environment:',
+    '      POSTGRESQL_USER: app',
+    '      POSTGRESQL_DATABASE: app',
+    '    secrets:',
+    `      - { source: ${PG_SECRET}, type: env, target: POSTGRESQL_PASSWORD }`,
+    '  api:',
+    `    image: ${CUSTOM}`,
+    '    container_name: podcity-api',
+    '    networks: [backend]',
+    '  web:',
+    `    image: ${NGINX}`,
+    '    container_name: web',
+    '    networks: [backend]',
+    '    ports: ["8080:8080"]',
+    '    volumes: [/home/user/site:/opt/app-root/src:ro]',
+    '    tmpfs: [/var/lib/nginx/tmp]',
+    '  metrics:',
+    '    image: registry.access.redhat.com/ubi9/ubi:latest',
+    '    container_name: metrics-collector',
+    '    networks: [backend]',
+    '    restart: always',
+    `    command: ${metricsCommand}`,
+    'networks:',
+    `  ${NET}: { external: true }`,
+    'volumes:',
+    '  pgdata: { external: true }',
+    'secrets:',
+    `  ${PG_SECRET}: { external: true }`,
+  ];
+  const PROJECT = 'podcity';
+  // Each old container is removed and a new one created from the same settings. Creates go out farthest
+  // plot first (db detours for its env cards and secret), so the trucks never pass each other on the lane.
+  const composeStack: { old: string; create: Extract<SimEvent, { type: 'container.create' }>; ports: Port[] }[] = [
+    { old: 'api-1', create: { type: 'container.create', id: 'api-2', name: 'podcity-api', image: CUSTOM, mounts: [], env: [], compose: PROJECT }, ports: [] },
+    {
+      old: 'metrics-1',
+      create: { type: 'container.create', id: 'metrics-2', name: 'metrics-collector', image: UBI, mounts: [], env: [], restart: 'always', command: metricsCommand, runFor: METRICS_EVERY, compose: PROJECT },
+      ports: [],
+    },
+    { old: 'web-3', create: { type: 'container.create', id: 'web-4', name: 'web', image: NGINX, mounts: webMounts, env: [], compose: PROJECT }, ports: [webPort] },
+    { old: 'db-3', create: { type: 'container.create', id: 'db-4', name: 'db', image: POSTGRES, mounts: dbMounts, env: dbEnv, compose: PROJECT }, ports: [] },
+  ];
+
+  // Quadlets for the final city: the same settings podman run used, as unit files systemd can start at boot.
+  const unitFile = (description: string, container: string[]) => [
     '[Unit]',
-    'Description=podcity web',
+    `Description=${description}`,
     '',
     '[Container]',
-    `Image=${CUSTOM}`,
+    ...container,
     `Network=${NET}`,
-    'PublishPort=8080:8080',
     '',
     '[Install]',
     'WantedBy=default.target',
+  ];
+  const quadlets: { file: string; image: string; lines: string[] }[] = [
+    {
+      file: 'web.container',
+      image: NGINX,
+      lines: unitFile('podcity web', [
+        `Image=${NGINX}`,
+        'ContainerName=web',
+        'PublishPort=8080:8080',
+        'Volume=/home/user/site:/opt/app-root/src:ro',
+        'Tmpfs=/var/lib/nginx/tmp',
+      ]),
+    },
+    {
+      file: 'api.container',
+      image: CUSTOM,
+      lines: unitFile('podcity api', [`Image=${CUSTOM}`, 'ContainerName=podcity-api']),
+    },
+    {
+      file: 'db.container',
+      image: POSTGRES,
+      lines: unitFile('podcity database', [
+        `Image=${POSTGRES}`,
+        'ContainerName=db',
+        'Volume=pgdata:/var/lib/pgsql/data',
+        'Environment=POSTGRESQL_USER=app',
+        'Environment=POSTGRESQL_DATABASE=app',
+        `Secret=${PG_SECRET},type=env,target=POSTGRESQL_PASSWORD`,
+      ]),
+    },
   ];
 
   return [
@@ -120,24 +202,6 @@ export function defaultSteps(seed = 42): Step[] {
       at(0.3, { type: 'network.connect', container: 'db-2', network: NET, ports: [] });
     }),
 
-    step('migrate', 'Migrate', 'A one-off db-migrate container from the same postgresql-16 image runs with --rm: it reaches db by name over backend, applies the migration, exits 0 and is removed straight away. The image stays.', (at) => {
-      at(0, {
-        type: 'container.create',
-        id: 'migrate-1',
-        name: 'db-migrate',
-        image: POSTGRES,
-        mounts: migrateMounts,
-        env: migrateEnv,
-        autoRemove: true,
-        command: 'psql -f /migrations/001_init.sql',
-      });
-      at(3.5, { type: 'container.start', id: 'migrate-1' });
-      at(0.3, { type: 'network.connect', container: 'migrate-1', network: NET, ports: [] });
-      at(1, { type: 'network.request', from: 'migrate-1', to: 'db-2', network: NET, label: 'psql -> db:5432 · 001_init.sql' });
-      at(3, { type: 'container.exit', id: 'migrate-1', code: 0 });
-      at(0.5, { type: 'container.remove', id: 'migrate-1' }); // --rm
-    }),
-
     step('expose', 'Expose', 'web is re-created with -p 8080:8080 (UBI nginx listens on 8080 as non-root); a road leads through a gate in the wall to the host.', (at) => {
       at(0, { type: 'container.remove', id: 'web-1' });
       at(0.5, { type: 'container.create', id: 'web-2', name: 'web', image: NGINX, mounts: [], env: [] });
@@ -157,19 +221,23 @@ export function defaultSteps(seed = 42): Step[] {
       at(0.3, { type: 'network.connect', container: 'db-3', network: NET, ports: [] });
     }),
 
-    step('build', 'Containerfile', 'The R&D department writes a Containerfile FROM the UBI nginx image. podman build reuses all of its layers, commits one new layer per COPY, and delivers the custom image to the warehouse.', (at) => {
-      at(0, { type: 'image.build.start', image: CUSTOM, base: NGINX, containerfile });
-      containerfile
-        .filter((line) => line.startsWith('COPY'))
-        .forEach((instruction, i) => at(1.5, { type: 'image.build.layer', image: CUSTOM, instruction, layer: customLayers[i]! }));
-      at(1.5, { type: 'image.build.done', image: CUSTOM, layers: [...nginxLayers, ...customLayers] });
+    step('migrate', 'Migrate', 'A one-off db-migrate container from the same postgresql-16 image runs with --rm: it reaches db by name over backend, applies the migration, exits 0 and is removed straight away. The image stays.', (at) => {
+      at(0, {
+        type: 'container.create',
+        id: 'migrate-1',
+        name: 'db-migrate',
+        image: POSTGRES,
+        mounts: migrateMounts,
+        env: migrateEnv,
+        autoRemove: true,
+        command: 'psql -f /migrations/001_init.sql',
+      });
+      at(3.5, { type: 'container.start', id: 'migrate-1' });
+      at(0.3, { type: 'network.connect', container: 'migrate-1', network: NET, ports: [] });
+      at(1, { type: 'network.request', from: 'migrate-1', to: 'db-3', network: NET, label: 'psql -> db:5432 · 001_init.sql' });
+      at(3, { type: 'container.exit', id: 'migrate-1', code: 0 });
+      at(0.5, { type: 'container.remove', id: 'migrate-1' }); // --rm
     }),
-
-    step('quadlet', 'Quadlet', 'The Quadlet department writes web.container for the custom image and sends it to systemd. On daemon-reload the Quadlet generator turns it into web.service, which systemd can now start at boot and restart on failure.', (at) => {
-      at(0, { type: 'quadlet.create', file: 'web.container', path: '~/.config/containers/systemd/web.container', image: CUSTOM, lines: quadlet });
-      at(2, { type: 'systemd.daemon-reload', generated: [{ quadlet: 'web.container', unit: 'web.service' }] });
-    }),
-
 
     step('metrics', 'Metrics', `A metrics-collector from the plain UBI image runs a short scrape and exits; --restart=always starts it again, so it cycles every ${METRICS_EVERY} seconds for as long as the city runs.`, (at) => {
       at(0, {
@@ -180,11 +248,39 @@ export function defaultSteps(seed = 42): Step[] {
         mounts: [],
         env: [],
         restart: 'always',
-        command: `sh -c 'curl -s http://web:8080/ >/dev/null; sleep ${METRICS_EVERY}'`,
+        command: metricsCommand,
         runFor: METRICS_EVERY,
       });
       at(3.5, { type: 'container.start', id: 'metrics-1' });
       at(0.3, { type: 'network.connect', container: 'metrics-1', network: NET, ports: [] });
+    }),
+
+    step('build', 'Containerfile', 'The R&D department writes a Containerfile FROM the UBI nginx image. podman build reuses all of its layers, commits one new layer per COPY, and delivers podcity-api to the warehouse. It is then deployed as a container on backend like any other image.', (at) => {
+      at(0, { type: 'image.build.start', image: CUSTOM, base: NGINX, containerfile });
+      containerfile
+        .filter((line) => line.startsWith('COPY'))
+        .forEach((instruction, i) => at(1.5, { type: 'image.build.layer', image: CUSTOM, instruction, layer: customLayers[i]! }));
+      at(1.5, { type: 'image.build.done', image: CUSTOM, layers: [...nginxLayers, ...customLayers] });
+      // The truck waits for the image to reach the warehouse, then deploys it like any other.
+      at(1, { type: 'container.create', id: 'api-1', name: 'podcity-api', image: CUSTOM, mounts: [], env: [] });
+      at(3.5, { type: 'container.start', id: 'api-1' });
+      at(0.3, { type: 'network.connect', container: 'api-1', network: NET, ports: [] });
+    }),
+
+    step('compose', 'Compose', 'A blueprint stand by the service road holds compose.yaml: the whole stack (db, podcity-api, web, metrics-collector) with its network, volume, secret, ports and mounts in one file. podman compose up --force-recreate redeploys every service from it at once: three more trucks join the deploy truck, one per service.', (at) => {
+      at(0, { type: 'compose.up', project: PROJECT, path: '~/podcity/compose.yaml', lines: composeFile, services: composeStack.map((c) => c.create.name) });
+      // The whole stack at once: four trucks, one per service.
+      composeStack.forEach((c, i) => at(i === 0 ? 1.5 : 0.1, { type: 'container.remove', id: c.old }));
+      composeStack.forEach((c, i) => at(i === 0 ? 0.5 : 0.4, c.create));
+      composeStack.forEach((c, i) => at(i === 0 ? 3.5 : 0.1, { type: 'container.start', id: c.create.id }));
+      composeStack.forEach((c) => at(0.1, { type: 'network.connect', container: c.create.id, network: NET, ports: c.ports }));
+    }),
+
+    step('quadlet', 'Quadlet', 'The Quadlet department writes web.container, api.container and db.container and sends them to systemd, where each gets a pavilion beside the tower (click one to read it). On daemon-reload the Quadlet generator turns each into a .service, which systemd can now start at boot and restart on failure.', (at) => {
+      quadlets.forEach((q, i) =>
+        at(i === 0 ? 0 : 1.5, { type: 'quadlet.create', file: q.file, path: `~/.config/containers/systemd/${q.file}`, image: q.image, lines: q.lines }),
+      );
+      at(2, { type: 'systemd.daemon-reload', generated: quadlets.map((q) => ({ quadlet: q.file, unit: q.file.replace(/\.container$/, '.service') })) });
     }),
   ];
 }

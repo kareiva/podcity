@@ -18,8 +18,8 @@ export const districts = {
   factories: { x: 10, z: -10, w: 60, d: 40 },
   lockers: { x: 36, z: 30, w: 30, d: 16 }, // secured yard, fenced; next to the freight station
   businessCenter: { x: -48, z: 87, w: 12, d: 12 }, // systemd: host side, outside the wall, on the host highway's north roadside
-  shoppingCenter: { x: -34, z: 30, w: 14, d: 10 },
-  secrets: { x: -8, z: 30, w: 7, d: 8 }, // Secret Facility: between the shopping center and the locker yard, in the gap between port-road columns // demo entry point, next to the Quadlet department, clear of the port roads south
+  shoppingCenter: { x: -34, z: 30, w: 14, d: 10 }, // demo entry point, next to the Quadlet department, clear of the port roads south
+  secrets: { x: 10, z: -41, w: 7, d: 8 }, // Secret Facility: behind (north of) the factory hall, off the road network; door faces the hall
   freight: { x: 65, z: 45, w: 20, d: 20 },
   hostLand: { x: 0, z: 100, w: 140, d: 12 }, // host filesystem: a highway beyond the wall
 } satisfies Record<string, Pad>;
@@ -182,10 +182,27 @@ export function quadletOffice(): { building: { x: number; z: number }; board: { 
   return { building: { x: q.x - 3, z: q.z - 1 }, board: { x: q.x + 5, z: q.z + 2 } };
 }
 
-/** Plate for the n-th generated unit on the city-facing (north) wall of the systemd tower. */
+/** Compose blueprint stand: inside the wall, just east of the service road coming in through the wall gate; faces the road (west). */
+export const composeStand = { x: -41, z: 52 };
+
+/** Pavilion for the n-th deployed quadlet: a row on the host highway's north roadside, east of the systemd tower. */
+export function quadletPavilionSlot(n: number): { x: number; z: number } {
+  const b = districts.businessCenter;
+  return { x: b.x + 9 + n * 6.5, z: b.z + 1 };
+}
+
+/** systemd tower: a lobby block, then one floor per generated service unit on top. */
+export const SYSTEMD_TOWER = { w: 8, base: 9, floor: 3 };
+
+/** Height of the systemd tower with n unit floors. */
+export function systemdTowerHeight(n: number): number {
+  return SYSTEMD_TOWER.base + n * SYSTEMD_TOWER.floor;
+}
+
+/** Plate for the n-th generated unit, on the city-facing (north) wall of its own floor of the systemd tower. */
 export function unitPlateSlot(n: number): { x: number; y: number; z: number } {
   const b = districts.businessCenter;
-  return { x: b.x, y: 14 - n * 2, z: b.z - 4.2 };
+  return { x: b.x, y: 0.3 + systemdTowerHeight(n) + SYSTEMD_TOWER.floor / 2, z: b.z - SYSTEMD_TOWER.w / 2 - 0.05 };
 }
 
 /** Road from the systemd Business Center north through a gate in the south wall, to the Environmental Shopping Center's front. */
@@ -237,17 +254,24 @@ export function factorySlot(n: number): { x: number; z: number } {
 /** Where the deploy truck parks and loads image containers: between the warehouse and the factory district. */
 export const truckBay = { x: -31, z: -12 };
 
+/** Bays for the extra trucks compose brings in to deploy a whole stack at once, beside the main bay. */
+export const extraTruckBays = [
+  { x: -31, z: -16.5 },
+  { x: -31, z: -7.5 },
+  { x: -31, z: -3 },
+];
+
 /** Lane south of a plot row (clear of the buildings and the next row) the truck drives along to a plot. */
 export function deployLaneZ(factory: { z: number }): number {
   return factory.z + FACTORY.l / 2 + 2; // middle of the 4 m gap between plot rows
 }
 
 /** Truck route from the loading bay to just in front of a factory plot. */
-export function deployRoute(factory: { x: number; z: number }): [number, number][] {
+export function deployRoute(factory: { x: number; z: number }, bay: { x: number; z: number } = truckBay): [number, number][] {
   const lane = deployLaneZ(factory);
   return roundedPath([
-    [truckBay.x, truckBay.z],
-    [truckBay.x + 5, lane],
+    [bay.x, bay.z],
+    [bay.x + 5, lane],
     [factory.x - 6, lane],
     [factory.x, lane],
   ]);
@@ -256,7 +280,7 @@ export function deployRoute(factory: { x: number; z: number }): [number, number]
 /** North-south corridor between the warehouse hall and the factory district, used by the truck. */
 const TRUCK_CORRIDOR_X = -24;
 
-/** East-west lane in front of the pickup stops (Environmental Shopping Center, Secret Facility). */
+/** East-west lane in front of the Environmental Shopping Center, where the truck picks up env cards. */
 export function pickupLaneZ(): number {
   const sc = districts.shoppingCenter;
   return sc.z + sc.d / 2 + 4;
@@ -267,46 +291,45 @@ export function shopStop(): { x: number; z: number } {
   return { x: districts.shoppingCenter.x, z: pickupLaneZ() };
 }
 
-/** Where the truck stops in front of the Secret Facility to collect sealed secret documents. */
+/**
+ * Where the truck stops in front of the Secret Facility (behind the factory
+ * hall) to collect sealed secret documents. No road leads there: the truck
+ * reaches it up the corridor and along the strip north of the hall.
+ */
 export function secretStop(): { x: number; z: number } {
-  return { x: districts.secrets.x, z: pickupLaneZ() };
+  const f = districts.secrets;
+  return { x: f.x, z: f.z + f.d / 2 + 3 };
 }
 
-/** Road along the pickup lane, from the shopping center's front to the Secret Facility's door. */
-export const secretRoad: [number, number][] = [
-  [districts.shoppingCenter.x, pickupLaneZ() + 1],
-  [districts.secrets.x, pickupLaneZ() + 1],
-  [districts.secrets.x, districts.secrets.z + districts.secrets.d / 2],
-];
-
-/** Bay -> first pickup stop: down the corridor, then along the pickup lane. */
-export function bayToStopRoute(stop: { x: number; z: number }): [number, number][] {
+/** Bay -> first pickup stop: along the corridor (south to the shopping center, north to the Secret Facility), then along its lane. */
+export function bayToStopRoute(stop: { x: number; z: number }, bay: { x: number; z: number } = truckBay): [number, number][] {
+  const dir = Math.sign(stop.z - bay.z);
   return roundedPath([
-    [truckBay.x, truckBay.z],
-    [TRUCK_CORRIDOR_X, truckBay.z + 6],
-    [TRUCK_CORRIDOR_X, stop.z - 6],
+    [bay.x, bay.z],
+    [TRUCK_CORRIDOR_X, bay.z + 6 * dir],
     [TRUCK_CORRIDOR_X, stop.z],
     [stop.x, stop.z],
   ]);
 }
 
-/** One pickup stop to the next, straight along the pickup lane. */
+/** One pickup stop to the next: straight along a shared lane, otherwise via the corridor. */
 export function stopToStopRoute(from: { x: number; z: number }, to: { x: number; z: number }): [number, number][] {
+  if (from.z === to.z) return roundedPath([[from.x, from.z], [to.x, to.z]]);
   return roundedPath([
     [from.x, from.z],
+    [TRUCK_CORRIDOR_X, from.z],
+    [TRUCK_CORRIDOR_X, to.z],
     [to.x, to.z],
   ]);
 }
 
-/** Last pickup stop -> back to the corridor, up it, and along the plot row's lane to the plot. */
+/** Last pickup stop -> back to the corridor, along it to the plot row's lane, and along the lane to the plot. */
 export function stopToPlotRoute(stop: { x: number; z: number }, factory: { x: number; z: number }): [number, number][] {
   const lane = deployLaneZ(factory);
   return roundedPath([
     [stop.x, stop.z],
     [TRUCK_CORRIDOR_X, stop.z],
-    [TRUCK_CORRIDOR_X, stop.z - 6],
-    [TRUCK_CORRIDOR_X, lane + 3],
-    [TRUCK_CORRIDOR_X + 3, lane],
+    [TRUCK_CORRIDOR_X, lane],
     [factory.x, lane],
   ]);
 }

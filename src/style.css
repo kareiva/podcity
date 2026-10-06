@@ -128,6 +128,8 @@ html, body {
 .tooltip[hidden] { display: none; }
 .tooltip .kind { font-size: 10px; font-weight: 700; text-transform: uppercase; color: var(--muted); }
 .tooltip .name { font: 13px ui-monospace, monospace; }
+.tooltip .detail { margin: 4px 0 0; font: 11px/1.4 ui-monospace, monospace; white-space: pre; }
+.tooltip .detail[hidden] { display: none; }
 
 .controls label {
   font-size: 13px;

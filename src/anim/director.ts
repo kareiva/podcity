@@ -24,6 +24,7 @@ import {
   stopToPlotRoute,
   stopToStopRoute,
   truckBay,
+  extraTruckBays,
   pullCranes,
   pullWaypoints,
   type CraneSpec,
@@ -38,7 +39,11 @@ import {
   pathSampler,
   smoothPath,
   quadletOffice,
-  quadletRoute,
+  quadletRoad,
+  quadletPavilionSlot,
+  composeStand,
+  SYSTEMD_TOWER,
+  systemdTowerHeight,
   rndLab,
   shelfSlot,
   unitPlateSlot,
@@ -73,6 +78,13 @@ interface Factory {
   baseLabel: string;
   running: boolean;
   networks: Set<string>; // networks it is hooked onto with a feeder
+}
+
+/** A deploy truck and the bay it parks at. */
+interface Truck {
+  truck: THREE.Object3D;
+  bay: { x: number; z: number };
+  busy: boolean;
 }
 
 /** A truck stop on the way to a plot, and what is picked up there. */
@@ -119,6 +131,9 @@ export class Director {
   private spotRelease = new Map<string, () => void>(); // image -> frees the unpacking spot once it is gone
   private belts = new Map<string, Belt>(); // network name -> conveyor
   private quadlets = new Map<string, THREE.Group>(); // quadlet file -> pinned board
+  private composeStands = new Map<string, THREE.Group>(); // compose project -> blueprint stand
+  private fleet: Truck[] = []; // deploy trucks: the city's own, plus the extra ones compose brings in
+  private truckWaiters: (() => void)[] = []; // deliveries waiting for a free truck
   private secrets = new Map<string, THREE.Mesh>(); // podman secret -> plaque at the Secret Facility
   private units = new Map<string, THREE.Mesh>(); // generated systemd unit -> plate on the tower
   private trafficPaths = new Map<string, ReturnType<typeof pathSampler>>(); // `net|a|b` -> feeder-belt-feeder path
@@ -149,6 +164,8 @@ export class Director {
     bus.on('systemd.daemon-reload', (e) => {
       for (const g of e.generated) this.enqueue(`quadlet:${g.quadlet}`, () => this.generateUnit(g.quadlet, g.unit));
     });
+    bus.on('compose.up', () => this.addComposeTrucks()); // at once, so the stack's deliveries find them
+    bus.on('compose.up', (e) => this.enqueue(`compose:${e.project}`, () => this.raiseBlueprint(e)));
     bus.on('secret.create', (e) => this.enqueue(`secret:${e.name}`, () => this.storeSecret(e)));
     bus.on('volume.create', (e) => this.enqueue(`volume:${e.name}`, () => this.buildLocker(e)));
     bus.on('volume.remove', (e) => this.enqueue(`volume:${e.name}`, () => this.removeLocker(e.name)));
@@ -190,11 +207,40 @@ export class Director {
     this.scene.add(this.root);
     this.arcs = new ArcLayer(this.root, this.tw);
     this.layerArcs = new ArcLayer(this.root, this.tw);
-    for (const m of [this.names, this.plots, this.factories, this.manifests, this.imageSlots, this.imageStored, this.imageLayers, this.crates, this.lockers, this.hostPaths, this.cargo, this.locks, this.spotRelease, this.belts, this.builds, this.quadlets, this.secrets, this.units, this.trafficPaths])
+    for (const m of [this.names, this.plots, this.factories, this.manifests, this.imageSlots, this.imageStored, this.imageLayers, this.crates, this.lockers, this.hostPaths, this.cargo, this.locks, this.spotRelease, this.belts, this.builds, this.quadlets, this.composeStands, this.secrets, this.units, this.trafficPaths])
       m.clear();
     this.selectedImage = null;
     this.crateCount = 0;
+    this.fleet = [];
+    this.truckWaiters = [];
     this.restCranes();
+  }
+
+  /** Fade every dynamic object (and its labels) to transparent; reset() removes them afterwards. */
+  async fadeOut(duration: number): Promise<void> {
+    const gen = this.gen;
+    const materials = new Map<THREE.Material, number>();
+    const labels = new Map<HTMLElement, number>();
+    this.root.traverse((o) => {
+      if (o instanceof THREE.Mesh || o instanceof THREE.Line || o instanceof THREE.Points) {
+        const ms = Array.isArray(o.material) ? o.material : [o.material];
+        for (const m of ms as THREE.Material[]) if (!materials.has(m)) materials.set(m, m.opacity);
+      }
+      if ('element' in o && o.element instanceof HTMLElement) labels.set(o.element, Number(o.element.style.opacity || 1));
+    });
+    for (const m of materials.keys()) {
+      m.transparent = true;
+      m.needsUpdate = true;
+    }
+    await this.tw.tween({
+      duration,
+      ease: ease.linear,
+      update: (k) => {
+        if (gen !== this.gen) return;
+        for (const [m, base] of materials) m.opacity = base * (1 - k);
+        for (const [el, base] of labels) el.style.opacity = String(base * (1 - k));
+      },
+    });
   }
 
   /** Cranes are part of the static city: put them back in their idle pose and drop anything they hold. */
@@ -209,6 +255,8 @@ export class Director {
       const hook = hoist.getObjectByName('hook')!;
       for (const load of hook.children.filter((c) => c.name !== 'block')) this.dispose(load);
     }
+    const roof = this.scene.getObjectByName('systemd:roof');
+    if (roof) roof.position.y = SYSTEMD_TOWER.base + 1.5; // unit floors are dynamic and went with the reset
     const truck = this.scene.getObjectByName('truck:deploy');
     if (truck) {
       truck.position.set(truckBay.x, 0.3, truckBay.z);
@@ -536,10 +584,11 @@ export class Director {
   }
 
   /** A text document (Containerfile, unit file) pinned on a board, its text floating above. */
-  private async pinDocument(at: { x: number; z: number }, lines: string[], info: EntityInfo): Promise<THREE.Group> {
+  private async pinDocument(at: { x: number; z: number }, lines: string[], info: Omit<EntityInfo, 'detail'>): Promise<THREE.Group> {
     const sheet = new THREE.Group();
     sheet.position.set(at.x, 0.3, at.z);
     const paper = this.mesh(palette.card);
+    paper.name = 'paper';
     paper.scale.set(3, 4, 0.2);
     paper.position.y = 2.6;
     const post = this.mesh(palette.bars);
@@ -547,9 +596,10 @@ export class Director {
     post.position.y = 0.3;
     sheet.add(paper, post);
     const text = makeLabel(lines.join('\n'), 'label containerfile');
+    text.name = 'text';
     text.position.set(0, 5, 0); // just above the paper, below the district label
     sheet.add(text);
-    tag(sheet, info);
+    tag(sheet, { ...info, detail: lines.join('\n') });
     this.root.add(sheet);
     await this.tw.tween({ duration: 0.8, ease: ease.outBack, update: (k) => sheet.scale.setScalar(Math.max(k, 0.01)) });
     return sheet;
@@ -646,49 +696,181 @@ export class Director {
 
   // --- Quadlet: unit files for systemd --------------------------------------
 
-  /** The unit file is pinned up in the Quadlet department, with an arc from the image it runs. */
+  /**
+   * The unit file is pinned up in the Quadlet department, on top of any
+   * written before it (only the newest shows its text), with an arc from the image it runs.
+   */
   private async writeQuadlet(e: EventOf<'quadlet.create'>): Promise<void> {
-    const sheet = await this.pinDocument(quadletOffice().board, [`# ${e.path}`, ...e.lines], {
+    for (const older of this.quadlets.values()) this.dropText(older);
+    const { board } = quadletOffice();
+    const sheet = await this.pinDocument({ x: board.x, z: board.z + this.quadlets.size * 0.4 }, [`# ${e.path}`, ...e.lines], {
       key: keys.quadlet(e.file),
       kind: 'quadlet',
       name: e.file,
     });
+    sheet.userData.image = e.image;
     this.quadlets.set(e.file, sheet);
-    await this.whenImage(e.image);
-    const from = this.imageTop(e.image);
-    if (from) await this.arcs.connect(keys.image(e.image), keys.quadlet(e.file), from, sheet.position.clone().setY(5), imageColor(e.image));
+    await this.connectQuadlet(e.file, e.image);
+  }
+
+  private async connectQuadlet(file: string, image: string): Promise<void> {
+    const sheet = this.quadlets.get(file);
+    await this.whenImage(image);
+    const from = this.imageTop(image);
+    if (sheet && from) await this.arcs.connect(keys.image(image), keys.quadlet(file), from, sheet.position.clone().setY(5), imageColor(image));
+  }
+
+  private dropText(sheet: THREE.Object3D): void {
+    const text = sheet.getObjectByName('text');
+    if (text) this.dispose(text);
   }
 
   /**
-   * daemon-reload: a copy of the unit file travels the service road through
-   * the wall gate to systemd, whose generator turns it into a .service plate.
+   * daemon-reload: the unit file travels the service road through the wall
+   * gate to a small pavilion next to the systemd tower (click it to read the
+   * file), and systemd's generator turns it into a .service: one new floor on
+   * the tower with a green plate. One file on the road at a time.
    */
   private async generateUnit(file: string, unit: string): Promise<void> {
     const sheet = this.quadlets.get(file);
     if (!sheet) return;
-    const courier = this.mesh(palette.card);
-    courier.scale.set(1.4, 0.3, 1.8);
-    const [sx, sz] = quadletRoute[0]!;
-    courier.position.set(sx, 1.2, sz);
-    this.root.add(courier);
-    await this.ride(courier, smoothPath(quadletRoute), 3.5);
-    this.dispose(courier);
+    const image = sheet.userData.image as string;
+    const gen = this.gen;
+    const release = await this.acquire('quadlet:road');
+    const n = this.units.size;
+    const spot = quadletPavilionSlot(n);
+    let plate: THREE.Mesh | undefined;
+    try {
+      await this.arcs.disconnect(keys.quadlet(file));
+      this.dropText(sheet);
+      const [roadX, roadZ] = quadletRoad[0]!;
+      const yard = spot.z - 8; // between the wall and the tower, then east to the pavilion
+      await this.ride(sheet, smoothPath([[sheet.position.x, sheet.position.z], [roadX, roadZ], ...quadletRoad.slice(1), [roadX, yard], [spot.x, yard], [spot.x, spot.z]]), 3.5);
+      sheet.rotation.y = 0;
+      await this.raisePavilion(sheet);
+      if (gen !== this.gen) return;
+      plate = await this.addUnitFloor(n, file, unit);
+      this.units.set(unit, plate);
+    } finally {
+      release();
+    }
+    await Promise.all([
+      this.flash(plate),
+      this.connectQuadlet(file, image),
+      this.arcs.connect(keys.quadlet(file), keys.unit(unit), sheet.position.clone().setY(5), plate.position.clone(), palette.tower),
+    ]);
+  }
 
-    const slot = unitPlateSlot(this.units.size);
+  /** A small open pavilion rises round the unit file, which shrinks to a notice board inside. */
+  private async raisePavilion(sheet: THREE.Group): Promise<void> {
+    const paper = sheet.getObjectByName('paper');
+    const parts = new THREE.Group();
+    const floor = this.mesh(palette.building);
+    floor.scale.set(4.4, 0.3, 4.4);
+    floor.position.y = 0.15;
+    const posts = [-1, 1].flatMap((sx) =>
+      [-1, 1].map((sz) => {
+        const post = this.mesh(palette.building);
+        post.scale.set(0.3, 3.2, 0.3);
+        post.position.set(sx * 1.9, 1.9, sz * 1.9);
+        return post;
+      }),
+    );
+    const roof = new THREE.Mesh(new THREE.ConeGeometry(3.4, 1.6, 4), new THREE.MeshStandardMaterial({ color: palette.tower, flatShading: true }));
+    roof.rotation.y = Math.PI / 4;
+    roof.position.y = 4.3;
+    parts.add(floor, ...posts, roof);
+    parts.traverse((o) => (o.castShadow = true));
+    sheet.add(parts);
+    await this.tw.tween({
+      duration: 0.8,
+      ease: ease.outBack,
+      update: (k) => {
+        parts.scale.set(1, Math.max(k, 0.01), 1);
+        if (paper) {
+          paper.scale.set(3 - k, 4 - 1.6 * k, 0.2); // 3x4 sheet -> 2x2.4 board
+          paper.position.y = 2.6 - 0.8 * k;
+        }
+      },
+    });
+  }
+
+  /** One more floor for the n-th unit: the roof lifts, the floor grows under it, and a green plate goes on its city-facing wall. */
+  private async addUnitFloor(n: number, file: string, unit: string): Promise<THREE.Mesh> {
+    const b = districts.businessCenter;
+    const { w, floor: h } = SYSTEMD_TOWER;
+    const bottom = 0.3 + systemdTowerHeight(n);
+    const storey = this.mesh(palette.tower);
+    storey.position.set(b.x, bottom, b.z);
+    const name = `${unit} · generated from ${file}`;
+    tag(storey, { key: keys.unit(unit), kind: 'systemd', name });
+    this.root.add(storey);
+
+    const slot = unitPlateSlot(n);
     const plate = this.mesh(palette.running);
-    plate.scale.set(4, 1.4, 0.3);
     plate.position.set(slot.x, slot.y, slot.z);
     const label = makeLabel(unit);
     label.position.set(0, 0, -1);
     plate.add(label);
-    tag(plate, { key: keys.unit(unit), kind: 'systemd', name: `${unit} · generated from ${file}` });
+    tag(plate, { key: keys.unit(unit), kind: 'systemd', name });
     this.root.add(plate);
-    this.units.set(unit, plate);
-    await this.tw.tween({ duration: 0.6, ease: ease.outBack, update: (k) => plate.scale.set(4, 1.4 * Math.max(k, 0.01), 0.3) });
-    await Promise.all([
-      this.flash(plate),
-      this.arcs.connect(keys.quadlet(file), keys.unit(unit), sheet.position.clone().setY(5), plate.position.clone(), palette.tower),
-    ]);
+
+    const roof = this.scene.getObjectByName('systemd:roof');
+    await this.tw.tween({
+      duration: 0.8,
+      ease: ease.outCubic,
+      update: (k) => {
+        const grown = Math.max(h * k, 0.01);
+        storey.scale.set(w - 0.2, grown, w - 0.2); // slightly inset: floors read as separate storeys
+        storey.position.y = bottom + grown / 2;
+        plate.scale.set(4, Math.max(1.4 * k, 0.01), 0.3);
+        if (roof) roof.position.y = systemdTowerHeight(n) + grown + 1.5; // roof is local to the tower group (y 0.3)
+      },
+    });
+    return plate;
+  }
+
+  // --- Compose: the whole stack on one blueprint ----------------------------
+
+  /** `podman compose up`: a blueprint stand rises by the service road, one white box per service on its board. */
+  private async raiseBlueprint(e: EventOf<'compose.up'>): Promise<void> {
+    const stand = new THREE.Group();
+    stand.position.set(composeStand.x, 0.3, composeStand.z);
+    for (const dz of [-3, 3]) {
+      const leg = this.mesh(palette.bars);
+      leg.scale.set(0.3, 4.6, 0.3);
+      leg.position.set(0.5, 2.3, dz);
+      stand.add(leg);
+    }
+    // The board leans back (east), its drawing facing the road to the west.
+    const board = new THREE.Group();
+    board.position.set(0, 4.4, 0);
+    board.rotation.z = -0.35;
+    const sheet = this.mesh(palette.blueprint);
+    sheet.name = 'blueprint';
+    sheet.scale.set(0.18, 4.4, 7.4);
+    board.add(sheet);
+    e.services.forEach((_, i) => {
+      const box = this.mesh(palette.card);
+      box.scale.set(0.06, 1.1, 2.2);
+      box.position.set(-0.12, i < 2 ? 1 : -1, (i % 2 ? 1 : -1) * 1.7);
+      board.add(box);
+    });
+    stand.add(board);
+    const label = makeLabel(`${e.path.split('/').pop()} · ${e.project}`);
+    label.position.y = 8;
+    stand.add(label);
+    stand.traverse((o) => (o.castShadow = true));
+    tag(stand, { key: keys.compose(e.project), kind: 'compose', name: `${e.path} · ${e.services.length} services`, detail: e.lines.join('\n') });
+    this.root.add(stand);
+    this.composeStands.set(e.project, stand);
+    await this.popIn(stand);
+    await this.flashBlueprint(stand);
+  }
+
+  private async flashBlueprint(stand: THREE.Object3D): Promise<void> {
+    const sheet = stand.getObjectByName('blueprint');
+    if (sheet instanceof THREE.Mesh) await this.flash(sheet);
   }
 
   // --- Storage: lockers, host paths, scratch space --------------------------
@@ -865,24 +1047,85 @@ export class Director {
     const links: Promise<void>[] = [this.deliverFeedback(e, factory), this.connectStorage(e.id, factory, e.mounts)];
     const from = this.imageTop(e.image);
     if (from) links.push(this.arcs.connect(keys.image(e.image), keys.container(e.id), from, roof, imageColor(e.image)));
+    const stand = e.compose ? this.composeStands.get(e.compose) : undefined;
+    if (e.compose && stand) {
+      links.push(this.flashBlueprint(stand));
+      links.push(this.arcs.connect(keys.compose(e.compose), keys.container(e.id), stand.position.clone().setY(7.5), roof, palette.blueprint));
+    }
     await Promise.all(links);
   }
 
+  /** The city's own deploy truck, parked at the main bay. */
+  private mainTruck(): Truck | undefined {
+    if (!this.fleet.length) {
+      const truck = this.scene.getObjectByName('truck:deploy');
+      if (truck) this.fleet.push({ truck, bay: truckBay, busy: false });
+    }
+    return this.fleet[0];
+  }
+
+  /** compose up: three more trucks roll into the bays beside the main one, so the whole stack ships at once. */
+  private addComposeTrucks(): void {
+    const main = this.mainTruck();
+    if (!main || this.fleet.length > 1) return;
+    extraTruckBays.forEach((bay, i) => {
+      const truck = main.truck.clone(false);
+      truck.name = `truck:compose:${i}`;
+      for (const part of main.truck.children) {
+        if (part.name === 'rootfs' || part.userData.entity) continue; // a load, not the truck
+        const p = part.clone();
+        if (p instanceof THREE.Mesh) {
+          p.geometry = p.geometry.clone(); // own geometry and material: these are disposed on reset
+          p.material = (p.material as THREE.Material).clone();
+        }
+        truck.add(p);
+      }
+      truck.position.set(bay.x, 0.3, bay.z);
+      truck.rotation.set(0, 0, 0);
+      tag(truck, { key: truck.name, kind: 'district', name: 'Deploy truck · brought in by compose' });
+      this.root.add(truck);
+      const t: Truck = { truck, bay, busy: true };
+      this.fleet.push(t);
+      void this.popIn(truck).then(() => this.freeTruck(t));
+    });
+  }
+
+  /** First free truck; waits for one to come back if all are out. */
+  private async takeTruck(): Promise<Truck> {
+    const gen = this.gen;
+    for (;;) {
+      const free = this.fleet.find((t) => !t.busy);
+      if (free) {
+        free.busy = true;
+        return free;
+      }
+      await new Promise<void>((r) => this.truckWaiters.push(r));
+      if (gen !== this.gen) return new Promise(() => {}); // reset meanwhile: this choreography is dead
+    }
+  }
+
+  private freeTruck(t: Truck): void {
+    t.busy = false;
+    this.truckWaiters.shift()?.();
+  }
+
   /**
-   * The deploy truck loads `copy` at its bay, drives to the plot, unloads it
-   * onto the plot and heads back. One truck: deliveries queue for it.
+   * A free deploy truck loads `copy` at its bay, drives to the plot, unloads
+   * it onto the plot and heads back. Usually there is one truck and
+   * deliveries queue for it; compose brings in more.
    */
   private async truckToPlot(copy: THREE.Group, factory: Factory, pickups: Pickup[] = []): Promise<void> {
     const slot = factory.slot;
     const onPlot = new THREE.Vector3(slot.x, 0.3 + CARGO.h / 2, slot.z);
-    const truck = this.scene.getObjectByName('truck:deploy');
-    if (!truck) {
+    if (!this.mainTruck()) {
       copy.position.copy(onPlot); // no city (tests): just place it
       copy.rotation.set(0, Math.PI / 2, 0);
       return;
     }
-    const release = await this.acquire('truck:deploy');
-    const route = deployRoute(slot);
+    const taken = await this.takeTruck();
+    const { truck, bay } = taken;
+    const release = () => this.freeTruck(taken);
+    const route = deployRoute(slot, bay);
     const bed = new THREE.Vector3(TRUCK_BED.x, TRUCK_BED.top + CARGO.h / 2, 0);
 
     // Load: the copy hops out of the warehouse row onto the flatbed.
@@ -895,9 +1138,9 @@ export class Director {
     const cards: THREE.Mesh[] = [];
     let at: { x: number; z: number } | undefined;
     for (const p of pickups) {
-      const leg = at ? stopToStopRoute(at, p.stop) : bayToStopRoute(p.stop);
+      const leg = at ? stopToStopRoute(at, p.stop) : bayToStopRoute(p.stop, bay);
       if (at) await this.turnTo(truck, pathSampler(leg).at(0).yaw, 0.5);
-      await this.ride(truck, leg, at ? 2 : 3);
+      await this.ride(truck, leg, truckTime(leg));
       const got = p.take();
       await Promise.all(
         got.map(async (card, j) => {
@@ -914,9 +1157,9 @@ export class Director {
     if (at) {
       const onward = stopToPlotRoute(at, slot);
       await this.turnTo(truck, pathSampler(onward).at(0).yaw, 0.5);
-      await this.ride(truck, onward, 3.5);
+      await this.ride(truck, onward, truckTime(onward));
     } else {
-      await this.ride(truck, route, 3);
+      await this.ride(truck, route, truckTime(route));
     }
 
     // Unload onto the plot, lengthwise north-south like the factory that will rise around it;
@@ -936,7 +1179,7 @@ export class Director {
     void (async () => {
       const back = [...route].reverse();
       await this.turnTo(truck, pathSampler(back).at(0).yaw, 0.5);
-      await this.ride(truck, back, 2.5);
+      await this.ride(truck, back, truckTime(back));
       await this.turnTo(truck, 0, 0.5); // parked facing east, ready for the next load
       release();
     })();
@@ -1354,6 +1597,11 @@ export class Director {
       if ('element' in o && o.element instanceof HTMLElement) o.element.remove();
     });
   }
+}
+
+/** Seconds the deploy truck takes for a pickup leg: about 20 m/s, so long detours are not rushed. */
+function truckTime(route: [number, number][]): number {
+  return Math.max(1.5, pathSampler(route).length / 20);
 }
 
 function shortRef(ref: string): string {

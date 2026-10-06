@@ -23,7 +23,14 @@ export interface ContainerState {
   command?: string;
   restartPolicy?: 'always';
   runFor?: number;
+  compose?: string; // compose project
   restarts: number;
+}
+
+export interface ComposeState {
+  project: string;
+  path: string;
+  services: string[];
 }
 
 export interface NetworkState {
@@ -53,6 +60,7 @@ export interface PodmanState {
   networks: Map<string, NetworkState>;
   secrets: Set<string>; // names only: secret values are never modelled
   quadlets: Map<string, QuadletState>;
+  compose: Map<string, ComposeState>;
   pods: Map<string, PodState>;
 }
 
@@ -65,6 +73,7 @@ export function createState(): PodmanState {
     networks: new Map(),
     secrets: new Set(),
     quadlets: new Map(),
+    compose: new Map(),
     pods: new Map(),
   };
 }
@@ -114,6 +123,7 @@ export function applyEvent(state: PodmanState, e: SimEvent): void {
         command: e.command,
         restartPolicy: e.restart,
         runFor: e.runFor,
+        compose: e.compose,
         restarts: 0,
       });
       if (e.pod) state.pods.get(e.pod)?.members.push(e.id);
@@ -175,6 +185,9 @@ export function applyEvent(state: PodmanState, e: SimEvent): void {
         const q = state.quadlets.get(g.quadlet);
         if (q) q.unit = g.unit;
       }
+      break;
+    case 'compose.up':
+      state.compose.set(e.project, { project: e.project, path: e.path, services: [...e.services] });
       break;
     case 'pod.create':
       state.pods.set(e.id, { id: e.id, name: e.name, members: [] });

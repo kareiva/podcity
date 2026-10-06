@@ -176,11 +176,13 @@ describe('city layout', () => {
       districts.shoppingCenter,
       districts.quadlet,
       districts.secrets,
+      districts.rnd,
       ...Array.from({ length: 10 }, (_, n) => ({ ...factorySlot(n), w: FACTORY.w + 3, d: FACTORY.l })), // incl. scratch bins
     ];
     const inside = ([x, z]: [number, number], p: Pad) => Math.abs(x - p.x) < p.w / 2 + half && Math.abs(z - p.z) < p.d / 2 + half;
     const routes = [
       bayToStopRoute(shopStop()),
+      bayToStopRoute(secretStop()), // secret-only env
       stopToStopRoute(shopStop(), secretStop()),
       ...Array.from({ length: 5 }, (_, n) => stopToPlotRoute(secretStop(), factorySlot(n))),
       ...Array.from({ length: 5 }, (_, n) => stopToPlotRoute(shopStop(), factorySlot(n))),
@@ -203,17 +205,14 @@ describe('city layout', () => {
     }
   });
 
-  it('puts the Secret Facility between the shopping center and the locker yard, clear of every port road', () => {
+  it('puts the Secret Facility behind the factory hall, clear of the hall, belts and R&D', () => {
     const f = districts.secrets;
-    expect(f.x).toBeGreaterThan(districts.shoppingCenter.x);
-    expect(f.x).toBeLessThan(districts.lockers.x);
-    const roadHalf = 2.5 / 2;
-    for (let n = 0; n < 5; n++) {
-      // Port roads run due south from each plot column's door.
-      expect(Math.abs(factorySlot(n).x - f.x), `column ${n}`).toBeGreaterThan(f.w / 2 + roadHalf);
-    }
-    expect(overlaps(f, districts.shoppingCenter)).toBe(false);
-    expect(overlaps(f, districts.lockers)).toBe(false);
+    const hall = districts.factories;
+    expect(f.z + f.d / 2).toBeLessThan(hall.z - hall.d / 2); // north of the hall
     expect(secretStop().z - (f.z + f.d / 2)).toBeGreaterThan(1.32); // the truck stops in front, not inside
+    expect(secretStop().z + 1.32).toBeLessThan(hall.z - hall.d / 2 - 1); // ...and outside the hall
+    expect(secretStop().z + 1.32).toBeLessThan(networkBelt(1).z - 0.5); // ...clear of a second network's belt
+    expect(overlaps(f, districts.rnd)).toBe(false);
+    expect(Math.hypot(f.x, f.z) + Math.hypot(f.w, f.d) / 2).toBeLessThan(CITY_RADIUS);
   });
 });

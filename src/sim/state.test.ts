@@ -68,20 +68,23 @@ describe('default steps', () => {
       expect(sim.stepDone).toBe(true);
     });
     const s = sim.state;
-    expect([...s.containers.keys()].sort()).toEqual(['db-3', 'metrics-1', 'web-3']);
-    expect(s.containers.get('db-3')).toMatchObject({ status: 'running', mounts: [{ kind: 'volume', source: 'pgdata' }] });
-    expect(s.containers.get('db-3')?.env.map((e) => e.name)).toContain('POSTGRESQL_PASSWORD');
-    expect(s.containers.get('web-3')?.mounts.map((m) => m.kind).sort()).toEqual(['bind', 'tmpfs']);
+    expect([...s.containers.keys()].sort()).toEqual(['api-2', 'db-4', 'metrics-2', 'web-4']); // all recreated by compose
+    expect(s.containers.get('db-4')).toMatchObject({ status: 'running', compose: 'podcity', mounts: [{ kind: 'volume', source: 'pgdata' }] });
+    expect(s.containers.get('db-4')?.env.map((e) => e.name)).toContain('POSTGRESQL_PASSWORD');
+    expect(s.compose.get('podcity')?.services.sort()).toEqual(['db', 'metrics-collector', 'podcity-api', 'web']);
+    expect(s.containers.get('web-4')?.mounts.map((m) => m.kind).sort()).toEqual(['bind', 'tmpfs']);
     const nginx = s.images.get('registry.access.redhat.com/ubi9/nginx-124:latest')!;
-    const custom = s.images.get('localhost/podcity-web:1.0')!;
+    const custom = s.images.get('localhost/podcity-api:1.0')!;
     expect(custom.layers.slice(0, nginx.layers.length)).toEqual(nginx.layers); // built FROM nginx: its layers reused
     expect(custom.layers).toHaveLength(nginx.layers.length + 2); // one per COPY
     expect(s.containers.has('migrate-1')).toBe(false); // --rm
     expect(s.images.size).toBe(4); // the one-off left its image behind
-    expect(s.quadlets.get('web.container')).toMatchObject({ image: 'localhost/podcity-web:1.0', unit: 'web.service' });
+    expect(s.quadlets.get('web.container')).toMatchObject({ image: 'registry.access.redhat.com/ubi9/nginx-124:latest', unit: 'web.service' });
+    expect(s.quadlets.get('api.container')).toMatchObject({ image: 'localhost/podcity-api:1.0', unit: 'api.service' });
+    expect(s.quadlets.get('db.container')).toMatchObject({ image: 'registry.access.redhat.com/ubi9/postgresql-16:latest', unit: 'db.service' });
     expect(s.networks.get('backend')).toMatchObject({ driver: 'bridge', subnet: '10.89.0.0/24' });
-    for (const id of ['db-3', 'metrics-1', 'web-3']) expect(s.containers.get(id)?.networks, id).toEqual(['backend']);
-    expect(s.containers.get('web-3')?.ports).toEqual([{ host: 8080, container: 8080, protocol: 'tcp' }]);
+    for (const id of ['api-2', 'db-4', 'metrics-2', 'web-4']) expect(s.containers.get(id)?.networks, id).toEqual(['backend']);
+    expect(s.containers.get('web-4')?.ports).toEqual([{ host: 8080, container: 8080, protocol: 'tcp' }]);
   });
 
   it('fast-forward reaches the same state as playing step by step', () => {
@@ -144,9 +147,9 @@ describe('default steps', () => {
     sim.fastForward(steps.length); // as if replaying a later step
     sim.begin(steps.length - 1, 100);
     sim.update(100 + 10.5);
-    expect(sim.state.containers.get('metrics-1')!.status).toBe('exited');
+    expect(sim.state.containers.get('metrics-2')!.status).toBe('exited');
     sim.update(100 + 11.5);
-    expect(sim.state.containers.get('metrics-1')!.status).toBe('running');
+    expect(sim.state.containers.get('metrics-2')!.status).toBe('running');
   });
 
   it('creates the pgpass secret before db uses it as --secret for its password', () => {

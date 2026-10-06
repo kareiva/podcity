@@ -9,13 +9,17 @@ export function createTooltip(root: HTMLElement): { show(info: EntityInfo, x: nu
   kind.className = 'kind';
   const name = document.createElement('span');
   name.className = 'name';
-  el.append(kind, name);
+  const detail = document.createElement('pre');
+  detail.className = 'detail';
+  el.append(kind, name, detail);
   root.append(el);
 
   return {
     show(info, x, y) {
       kind.textContent = info.kind;
       name.textContent = info.name;
+      detail.textContent = info.detail ?? '';
+      detail.hidden = !info.detail;
       el.hidden = false;
       const pad = 8;
       const { width, height } = el.getBoundingClientRect();

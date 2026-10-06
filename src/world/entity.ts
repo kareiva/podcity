@@ -7,6 +7,7 @@ export type EntityKind =
   | 'image pull'
   | 'containerfile'
   | 'quadlet'
+  | 'compose'
   | 'volume'
   | 'host path'
   | 'scratch'
@@ -23,6 +24,8 @@ export interface EntityInfo {
   key: string;
   kind: EntityKind;
   name: string;
+  /** Longer text shown under the name in the tooltip, e.g. a unit file's contents. */
+  detail?: string;
 }
 
 export function tag(obj: Object3D, info: EntityInfo): void {
@@ -45,6 +48,7 @@ export const keys = {
   build: (ref: string) => `build:${ref}`,
   quadlet: (file: string) => `quadlet:${file}`,
   unit: (name: string) => `unit:${name}`,
+  compose: (project: string) => `compose:${project}`,
   volume: (name: string) => `vol:${name}`,
   network: (name: string) => `net:${name}`,
   hostPath: (path: string) => `host:${path}`,

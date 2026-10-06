@@ -15,7 +15,7 @@ import {
   truckBay,
   type CraneSpec,
   seaportLayout,
-  districts, quadletOffice, quadletRoad, secretRoad, rndLab, serviceGate, serviceRoute, warehouseHall, type DistrictId, type Pad } from './layout';
+  districts, quadletOffice, quadletRoad, SYSTEMD_TOWER, rndLab, serviceGate, serviceRoute, warehouseHall, type DistrictId, type Pad } from './layout';
 import { palette } from './palette';
 
 const DISTRICT_NAMES: Record<DistrictId, string> = {
@@ -74,7 +74,6 @@ export function buildCity(scene: THREE.Scene): City {
   addLaneMarkings(scene, districts.hostLand);
   addRoad(scene, serviceRoute);
   addRoad(scene, quadletRoad);
-  addRoad(scene, secretRoad);
   // The service road enters the city through a gate in the south wall: systemd lives on the host.
   const gatePos = serviceGate();
   const gate = makeGate(4, false);
@@ -524,10 +523,13 @@ function buildBusinessCenter(scene: THREE.Scene): void {
   const p = districts.businessCenter;
   const group = new THREE.Group();
   group.position.set(p.x, 0.3, p.z);
-  const tower = new THREE.Mesh(new THREE.BoxGeometry(8, 18, 8), mat(palette.tower));
-  tower.position.y = 9;
+  // Lobby block only: each generated service unit adds a floor on top (anim/director), lifting the roof.
+  const { w, base } = SYSTEMD_TOWER;
+  const tower = new THREE.Mesh(new THREE.BoxGeometry(w, base, w), mat(palette.tower));
+  tower.position.y = base / 2;
   const top = new THREE.Mesh(new THREE.BoxGeometry(5, 3, 5), mat(palette.running));
-  top.position.y = 19.5;
+  top.name = 'systemd:roof';
+  top.position.y = base + 1.5;
   for (const m of [tower, top]) {
     m.castShadow = true;
     group.add(m);
@@ -536,7 +538,7 @@ function buildBusinessCenter(scene: THREE.Scene): void {
   scene.add(group);
 }
 
-/** Secret Facility: a windowless concrete vault with a gold door (facing its road) and a camera mast. */
+/** Secret Facility: a windowless concrete vault behind the factory hall, no road; gold door facing the hall, and a camera mast. */
 function buildSecretFacility(scene: THREE.Scene): void {
   const p = districts.secrets;
   const group = new THREE.Group();

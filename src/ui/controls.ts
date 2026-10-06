@@ -36,6 +36,18 @@ export function mountControls(root: HTMLElement, clock: SimClock, bus: EventBus,
   autoBox.addEventListener('change', () => (player.autoplay = autoBox.checked));
   auto.append(autoBox, ' Autoplay');
   bar.append(auto);
+
+  const loop = document.createElement('label');
+  const loopBox = document.createElement('input');
+  loopBox.type = 'checkbox';
+  loopBox.checked = player.loop;
+  loopBox.addEventListener('change', () => (player.loop = loopBox.checked));
+  loop.append(loopBox, ' Loop');
+  loop.title = 'After the last step, fade the city out and start again from step 1';
+  bar.append(loop);
+  const syncLoop = () => (loopBox.disabled = !autoBox.checked);
+  autoBox.addEventListener('change', syncLoop);
+  syncLoop();
   root.append(bar);
 
   // Steps: click any step to replay it from a clean scene.
@@ -54,6 +66,8 @@ export function mountControls(root: HTMLElement, clock: SimClock, bus: EventBus,
     feed.replaceChildren();
     void player.goTo(i);
   };
+
+  player.onLoop = () => feed.replaceChildren();
 
   const stepButtons = player.steps.map((s, i) => {
     const li = document.createElement('li');
@@ -115,7 +129,9 @@ function describe(e: SimEvent): string {
     case 'image.build.start': return `podman build -t ${e.image} -f Containerfile .`;
     case 'image.build.layer': return `  ${e.instruction} --> ${e.layer}`;
     case 'image.build.done': return `  COMMIT ${e.image}`;
+    case 'compose.up': return `podman compose -f ${e.path} up -d --force-recreate  # ${e.services.join(', ')}`;
     case 'container.create':
+      if (e.compose) return `  [${e.compose}] recreate ${e.name}`;
       if (e.restart) return `podman run -d --restart=${e.restart} --name ${e.name}${e.mounts.map(mountFlag).join('')}${e.env.map(envFlag).join('')} ${e.image.split('/').pop()}${e.command ? ` ${e.command}` : ''}`;
       if (e.autoRemove) return `podman run --rm --name ${e.name}${e.mounts.map(mountFlag).join('')}${e.env.map(envFlag).join('')} ${e.image.split('/').pop()}${e.command ? ` ${e.command}` : ''}`;
       return `podman create --name ${e.name}${e.mounts.map(mountFlag).join('')}${e.env.map(envFlag).join('')} ${e.image.split('/').pop()}`;
