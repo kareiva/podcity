@@ -101,17 +101,31 @@ html, body {
 .mode.live { background: #dc2626; color: white; }
 
 .feed {
+  /* A terminal: dark in both themes, so typed commands (stdin) stay white and podman's output (stdout) is green. */
+  --term-bg: rgb(15 23 42 / 0.92);
+  --term-stdin: #f8fafc;
+  --term-stdout: #86efac;
   margin: 0;
   padding: 8px 12px;
   list-style: none;
   border-radius: 8px;
-  background: var(--panel);
+  background: var(--term-bg);
+  color: var(--term-stdin);
   font: 12px/1.5 ui-monospace, monospace;
-  white-space: pre;
-  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 40vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-width: thin;
+  scrollbar-color: rgb(148 163 184 / 0.5) transparent;
 }
 
-.feed li:first-child { color: var(--accent); }
+.feed:empty { display: none; }
+.feed li { padding-left: 2ch; text-indent: -2ch; } /* wrapped lines hang under the first */
+.feed li.stdin::before { content: '$ '; color: var(--term-stdout); }
+.feed li.stdout { color: var(--term-stdout); }
+.feed li.comment { color: #94a3b8; }
 
 .tooltip {
   position: fixed;

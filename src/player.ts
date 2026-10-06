@@ -22,8 +22,7 @@ export class Player {
   private seeking = false;
   private doneAt: number | null = null;
   private listeners = new Set<() => void>();
-  /** Called when the loop starts over, before step 1 is replayed. */
-  onLoop: () => void = () => {};
+  private stepListeners = new Set<(i: number) => void>();
 
   constructor(
     private readonly sim: Simulator,
@@ -49,6 +48,16 @@ export class Player {
     this.listeners.add(fn);
   }
 
+  /** Called as step `i` starts playing (autoplay, Next, replay or loop), after any fast-forward. */
+  onStep(fn: (i: number) => void): void {
+    this.stepListeners.add(fn);
+  }
+
+  /** Earlier steps are being applied instantly; their events are not part of the step being played. */
+  get fastForwarding(): boolean {
+    return this.seeking;
+  }
+
   async goTo(i: number): Promise<void> {
     if (this.seeking) return;
     this.seeking = true;
@@ -59,6 +68,7 @@ export class Player {
     this.sim.fastForward(i);
     await this.director.idle();
     this.tw.instant = false;
+    this.stepListeners.forEach((fn) => fn(i));
     this.sim.begin(i, this.clock.now);
     this.seeking = false;
     this.notify();
@@ -76,6 +86,7 @@ export class Player {
     const next = this.sim.current + 1;
     if (this.autoplay && next < this.steps.length && now - this.doneAt >= STEP_PAUSE) {
       this.doneAt = null;
+      this.stepListeners.forEach((fn) => fn(next));
       this.sim.begin(next, now);
       this.notify();
     } else if (this.autoplay && this.loop && next >= this.steps.length && now - this.doneAt >= LOOP_PAUSE) {
@@ -88,7 +99,6 @@ export class Player {
     this.seeking = true;
     await this.director.fadeOut(LOOP_FADE);
     this.seeking = false;
-    this.onLoop();
     await this.goTo(0);
   }
 

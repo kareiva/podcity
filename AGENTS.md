@@ -70,8 +70,8 @@ Dependency direction is one-way: `sim` <- `anim` <- `world`/`engine` <- `ui`.
 | Image unpacking | **Unpacking gantry** (small crane) in the warehouse | Lifts the container's lid; layer crates hop out onto the shelves; lid goes back on and the empty container is cleared |
 | Image layer (content-addressed blob) | **Crate** labelled with short digest | Colored by a hash of the image name, so one image's layers share a unique color. Shared layers are stored once, keep the color of the image that first brought them, and flash when another image reuses them |
 | Local image store (`containers/storage`) | **Image Warehouse** | Shelves of crates under a 95% transparent gabled hall (not pickable); image = its shipping container, kept in a row along the warehouse front after unpacking (lid closed, labelled), in the image's color |
-| `podman build` + Containerfile | **R&D Department** north of the warehouse | Lab with antenna; the Containerfile is pinned on a board (text shown). `FROM` flashes the base image's crates (reused, not copied); each `COPY`/`RUN` commits a new crate on the lab bench; they are packed into a container that one tall tower crane (between R&D and the warehouse) lifts to the warehouse's unpacking gantry, and after unpacking the container is kept in the warehouse row as the new image |
-| Deploying an image to a container | **Deploy truck**: small container truck parked at a bay between the warehouse and the Factory District | Carries a copy of the image's container to the plot and unloads it; the factory rises around it |
+| `podman build` + Containerfile | **R&D Department** north of the warehouse | Lab with antenna; the Containerfile is pinned on a board (text shown). `FROM` flashes the base image's crates (reused, not copied) and a copy of the base's container is craned over from the warehouse to the R&D yard as the starting point; each `COPY`/`RUN` commits a new crate (the new image's color) on top of the base copy; the new crates form the new image's container standing on the base copy, which one tall tower crane (between R&D and the warehouse) lifts to the warehouse's unpacking gantry; the base copy left in the yard then explodes; after unpacking the container is kept in the warehouse row as the new image |
+| Deploying an image to a container | **Deploy truck**: small container truck parked at a bay between the warehouse and the Factory District (compose brings three more for parallel deploys) | Carries a copy of the image's container to the plot and unloads it; the factory rises around it |
 | OCI runtime (crun/runc) | **Construction crew** | Builds a factory from a blueprint |
 | Container | **Factory building** shaped like an ISO 20ft shipping container (long side north-south, doors south; the ship's cargo uses the same proportions) in the Factory District, under a 95% transparent sawtooth-roofed hall with a chimney (not pickable) | Green smokestack when running. Stopped or exited containers remain as **abandoned buildings**: weathered, boarded up, no green stack (red stack if exited non-zero) |
 | Container rootfs (overlay) | **Unboxing floor** inside factory | Read-only crates stacked (lowerdirs), thin glass floor on top (upperdir) |
@@ -90,12 +90,14 @@ Dependency direction is one-way: `sim` <- `anim` <- `world`/`engine` <- `ui`.
 | Host (outside the wall) | **Host highway** south of the wall; systemd stands on its north roadside (asphalt plot) | Narrow three-lane asphalt highway with white edge lines and dashed lane markings; published-port roads end at its edge |
 | Bind mount / host path | **Small office building** on the host highway's far (south) roadside | Two storeys, blue windows, brown roof, door facing the highway; labelled with the path. Arc from factory over the wall; survives factory demolition |
 | Scratch space (tmpfs) | **Scratch bin** beside the factory | Ephemeral; demolished with the factory |
-| Environment variables | **Customer feedback cards** | Collected by the deploy truck at the Environmental Shopping Center on its way to the plot (they ride on the container roof), dropped at the factory door to queue, and are pinned to the factory wall when it starts; one card per `KEY=value`. Secret-backed vars are gold sealed cards |
+| Environment variables | **Customer feedback cards** | Collected by the deploy truck at the Environmental Shopping Center on its way to the plot (they ride on the container roof), dropped at the factory door to queue, and are pinned to the factory wall when it starts; one card per `KEY=value`. Secret-backed vars are gold sealed cards, collected at the Secret Facility |
 | Config / mounted config files | **Blueprint binder** delivered with factory | |
 | Secrets | **Armored courier + safe** inside factory | Contents never shown, only name and mount target |
-| Quadlet unit files (`.container`) | **Quadlet Department** inside the wall, between the Image Warehouse and the systemd Business Center | Clerk's office (slate roof like systemd); the unit file is pinned on a board. Its road joins the service road and reaches systemd through the wall gate |
-| systemd / generated units | **systemd Business Center** on the host highway's north roadside, outside the Podman perimeter (city wall); its road runs north through a gate in the south wall | Office tower holding the unit files; decides which factories start at boot and restarts failed ones |
+| Secret store (`podman secret create`) | **Secret Facility** behind (north of) the Factory District hall | Windowless vault with a gold door facing the hall, no road to it; each secret is a sealed gold plaque by the door (name only). The deploy truck detours up the corridor and along the strip behind the hall to collect sealed cards |
+| Quadlet unit files (`.container`) | **Quadlet Department** inside the wall, between the Image Warehouse and the systemd Business Center | Clerk's office (slate roof like systemd); unit files are pinned on a board (newest on top, its text shown). Its road joins the service road and reaches systemd through the wall gate; on daemon-reload each board travels there and a small open **pavilion** (posts, pyramid roof) rises round it, in a row east of the systemd tower on the highway's north roadside. Clicking a pavilion shows the unit file in the tooltip |
+| systemd / generated units | **systemd Business Center** on the host highway's north roadside, outside the Podman perimeter (city wall); its road runs north through a gate in the south wall | Office tower: a lobby block plus **one floor per generated service unit** (green `<name>.service` plate on its city-facing wall), so it grows taller as services are added; decides which factories start at boot and restarts failed ones |
 | Demo entry point | **Environmental Shopping Center** next to the Quadlet Department, clear of the published-port roads to the south | Where visitors arrive and see the running app; its front faces south onto the road that comes in through the wall gate from the systemd Business Center |
+| `podman compose` (`compose.yaml`) | **Blueprint stand** inside the wall, just east of the service road from the wall gate | Medium-sized drafting stand facing the road: a blue blueprint board with one white box per service, labelled `compose.yaml · <project>`; clicking it shows the compose file. `compose up` redeploys every service it lists, with an arc from the stand to each new factory |
 | `podman kube generate` + OpenShift | **Freight rail station** to the metropolis | Campus packed into a shipping container, train leaves for the OpenShift metro |
 
 ---
@@ -161,8 +163,9 @@ the user reading the inspector:
 |---|---|---|
 | Image (container in the warehouse row) | Container (factory) | Container was created from this image |
 | Base image (container) | Built image (container) | Image was built `FROM` this base |
-| Image (container) | Quadlet (unit file board) | Quadlet runs this image (`Image=`) |
-| Quadlet (unit file board) | Unit (plate on systemd tower) | systemd generated this `.service` from the quadlet |
+| Image (container) | Quadlet (unit file board / pavilion) | Quadlet runs this image (`Image=`) |
+| Quadlet (pavilion) | Unit (floor plate on systemd tower) | systemd generated this `.service` from the quadlet |
+| Compose (blueprint stand) | Container | Container was (re)created by `podman compose up` from this file |
 | Container | Volume (locker) | Container mounts this volume |
 | Container | Host path (office) | Container bind-mounts this host path |
 | Image (container, when selected) | Layer (crate on shelf) | Image is made of this layer; shared layers (e.g. UBI base) get an arc from every image that uses them. Drawn only while the image is selected |
@@ -188,6 +191,11 @@ everything, so live mode and simulated mode behave the same.
 type SimEvent =
   | { type: 'image.pull.start'; image: string; layers: Digest[] }
   | { type: 'image.layer.done'; image: string; layer: Digest; cached: boolean }
+  | { type: 'image.build.start'; image: string; base: string; containerfile: string[] }
+  | { type: 'image.build.stage'; image: string; stage: string; base: string }        // FROM base AS stage
+  | { type: 'image.build.layer'; image: string; instruction: string; layer: Digest; stage?: string; from?: string }
+  | { type: 'image.build.discard'; image: string; stage: string; layers: Digest[] } // intermediate stage dropped
+  | { type: 'image.build.done'; image: string; layers: Digest[] }
   | { type: 'container.create'; id: string; image: string; mounts: Mount[]; env: Env[]; autoRemove?: boolean; command?: string; restart?: 'always'; runFor?: number }
   | { type: 'container.start'; id: string; restart?: boolean }
   | { type: 'container.stop' | 'container.remove'; id: string }
@@ -205,7 +213,15 @@ type SimEvent =
 The simulation is split into steps that play in order and can each be
 replayed on their own. Replaying step N resets the scene, applies steps
 0..N-1 instantly (tweens complete immediately), then plays step N at normal
-speed. Autoplay advances to the next step after a short pause.
+speed. Autoplay advances to the next step after a short pause. With **Loop**
+on (needs autoplay), the last step runs for a while, then every created
+object fades out and playback starts again from step 1.
+
+The podman command log overlay (commands typed = stdin in white, podman's
+output = stdout in green) shows only the step being played: it is cleared
+as each step starts, headed `# n. Title`, and earlier steps applied
+instantly on a replay are not logged. To read or copy a step's log, turn
+autoplay off so the finished step stays on screen.
 
 | # | Step | What happens |
 |---|---|---|
@@ -213,15 +229,16 @@ speed. Autoplay advances to the next step after a short pause.
 | 2 | Network | `podman network create backend` (bridge, `10.89.0.0/24`); a conveyor belt unrolls along the north edge of the Factory District |
 | 3 | Deploy | `web` and `db` created with `--network backend` and started, each hooked onto the belt by a feeder as it starts; `db` exits (no `POSTGRESQL_*` credentials) and is left abandoned |
 | 4 | Environment | Feedback cards (env + secret password) delivered; `db` re-created with them and runs |
-| 5 | Migrate | One-off `db-migrate` from the same `postgresql-16` image: `podman run --rm --network backend -v /home/user/migrations:/migrations:ro` with `PG*` env (password from the secret); a packet travels the belt to `db` (`db-2`, just given its credentials) by name, it exits 0 and is auto-removed |
-| 6 | Expose | `web` re-created with `-p 8080:8080` (UBI nginx listens on 8080, non-root); road from factory through a wall gate to the host |
-| 7 | Storage | `pgdata` volume, `/home/user/site` host path and a tmpfs scratch bin; both containers re-created with mounts, keeping env, port and network |
-| 8 | Containerfile | R&D Department writes a Containerfile `FROM ubi9/nginx-124` with two `COPY` steps; `podman build` reuses all nginx/UBI crates, commits two new ones, and cranes deliver `localhost/podcity-web:1.0` to the warehouse in a container |
-| 9 | Quadlet | Quadlet Department writes `~/.config/containers/systemd/web.container` (custom image, `backend` network, `8080:8080`); on `systemctl --user daemon-reload` it travels to systemd, which generates `web.service` |
-| 10 | Metrics | `metrics-collector` from the plain `ubi9/ubi` image: `podman run -d --restart=always --network backend ubi sh -c 'curl -s http://web:8080/ >/dev/null; sleep 10'`. The workload exits 0 after 10 s and podman starts it again after a 1 s back-off, forever; the simulator (not the script) drives this restart loop |
+| 5 | Expose | `web` re-created with `-p 8080:8080` (UBI nginx listens on 8080, non-root); road from factory through a wall gate to the host |
+| 6 | Storage | `pgdata` volume, `/home/user/site` host path and a tmpfs scratch bin; both containers re-created with mounts, keeping env, port and network |
+| 7 | Migrate | One-off `db-migrate` from the same `postgresql-16` image: `podman run --rm --network backend -v /home/user/migrations:/migrations:ro` with `PG*` env (password from the secret); a packet travels the belt to `db` (`db-3`, now with its `pgdata` volume) by name, it exits 0 and is auto-removed |
+| 8 | Metrics | `metrics-collector` from the plain `ubi9/ubi` image: `podman run -d --restart=always --network backend ubi sh -c 'curl -s http://web:8080/ >/dev/null; sleep 10'`. The workload exits 0 after 10 s and podman starts it again after a 1 s back-off, forever; the simulator (not the script) drives this restart loop |
+| 9 | Containerfile | R&D Department writes a Containerfile `FROM ubi9/ubi:latest` with `RUN dnf -y install nginx` and two `COPY` steps; the crane brings a copy of the UBI container to R&D as the base, `podman build` reuses the UBI crate and commits three new ones on top of that copy, they form the `podcity-api` container, the crane delivers it `localhost/podcity-api:1.0` to the warehouse and the UBI copy in the yard explodes; the deploy truck then takes a copy to a new plot and `podcity-api` runs on `backend` |
+| 10 | Compose | A blueprint stand rises by the service road holding `~/podcity/compose.yaml`: `db`, `podcity-api`, `web` and `metrics-collector` with the network, volume, secret, port and mounts from the earlier steps (all external resources). `podman compose up -d --build --force-recreate` first rebuilds `podcity-api` (its service has `build:`) with a **multi-stage** Containerfile: `FROM ubi9/ubi AS builder` compiles the site, the final `FROM ubi9/ubi` stage installs nginx (cached) and takes only the result with `COPY --from=builder`, and the builder stage is discarded; once it has left the yard, a fresh UBI copy is craned in as the final stage's base. The output is byte-identical to step 9's `site/`, so the final layers keep their digests and it is the same `podcity-api:1.0` image. Only then does it redeploy the whole stack at once: three extra deploy trucks roll into bays beside the main one, all four old containers are removed and the four new ones are trucked out simultaneously (farthest plot first so trucks never pass on the lane; db detours for its env cards and secret), each to its old plot, with an arc from the stand |
+| 11 | Quadlet | Quadlet Department writes `web.container` (UBI nginx, `8080:8080`, site bind mount, tmpfs), `api.container` (`localhost/podcity-api:1.0`) and `db.container` (postgresql, `pgdata` volume, env + `pgpass` secret) into `~/.config/containers/systemd/`, all on `backend`; on `systemctl --user daemon-reload` they travel one by one to pavilions next to systemd, which generates `web.service`, `api.service` and `db.service`, each adding a floor to the tower |
 
 Mounts, env and published ports are fixed at create time in Podman, so
-steps 4, 6 and 7 re-create containers in place (`podman run --replace`: rm + create
+steps 4, 5, 6 and 10 re-create containers in place (`podman run --replace`: rm + create
 on the same plot), rather than changing a running one.
 
 The scenario uses Red Hat UBI images to show layer reuse:
@@ -240,8 +257,10 @@ three images reference it.
 | Event | Sequence |
 |---|---|
 | Image pull | Container pops up on the quay -> the tall tower crane swings to it, hooks it, lifts it over the wall, swings and sets it down under the unpacking gantry (positions from `layout.ts`: the mast stands so both ends lie on the jib circle, 120 degree swing) -> the unpacking gantry lifts the lid -> new layers hop out onto the shelves, cached layers flash "already here" -> lid back on -> the container hops into its place in the warehouse row and from then on is the image (clickable, arc anchor). The crane and each drop-off spot hold one container at a time, so overlapping pulls queue |
-| Image build | Containerfile board rises in R&D -> base image crates flash (FROM) -> one crate per COPY/RUN pops out of the lab onto the bench -> crates packed into a container in the R&D yard -> the R&D crane lifts it to the unpacking gantry -> lid off -> crates shelved -> lid on, container joins the warehouse row -> FROM arc drawn from the base image's container |
-| Quadlet + daemon-reload | Unit file board rises in the Quadlet Department, arc from its image -> a copy travels the road and service gate to the systemd tower -> green `web.service` plate appears on the tower's city-facing wall, arc from the quadlet |
+| Image build | Containerfile board rises in R&D -> base image crates and container flash (FROM) -> a copy of the base's container hops from the warehouse row to the unpacking spot and the R&D crane lifts it over to the R&D yard -> one crate per COPY/RUN pops out of the lab onto the base copy's roof -> the crates come together and the new image's container forms round them, standing on the base copy -> the R&D crane lifts it off the stack to the unpacking gantry -> the base copy in the yard explodes (fireball and fragments) -> lid off -> crates shelved -> lid on, container joins the warehouse row -> FROM arc drawn from the base image's container |
+| Multi-stage build | Containerfile board replaced in R&D, final-stage base crates flash -> `FROM … AS builder`: a copy of the builder base's container hops from the warehouse row to the unpacking spot and the R&D crane lifts it back over to the R&D yard -> builder-stage crates (own color) land on top of it -> `COPY --from=builder`: its last crate flashes and the result hops off it onto the lab bench -> the builder container tips into the skip behind the yard and is gone (its layers are not kept) -> once the builder has left the yard, the final stage's base copy is craned in (as in a single-stage build) -> crates waiting on the bench move onto its roof, the remaining layer lands there too, the new container forms on top and is craned to the warehouse, and the base copy explodes, as usual; crates whose digest is already shelved merge into it and flash, and if the image already stands in the row (same layers) the new container merges into it |
+| Compose up | Blueprint stand pops up beside the service road and its board flashes; with `--build`, no container is removed or recreated until every image build in flight is in the warehouse; three more deploy trucks pop in at bays next to the main one -> all old factories fold away -> each truck takes one service's image copy and they deliver in parallel (any free truck takes the next delivery) -> as each factory rises the board flashes and an arc runs from the stand to it. The extra trucks stay parked until the scene resets |
+| Quadlet + daemon-reload | Unit file board rises in the Quadlet Department (on top of earlier ones), arc from its image -> on reload each board in turn travels the road and service gate to its spot beside the systemd tower, a pavilion rises round it and the board shrinks to a notice board inside (image arc redrawn there) -> the tower's roof lifts and a new floor grows under it with a green `<name>.service` plate on its city-facing wall, arc from the quadlet |
 | Container create (env) | The deploy truck, loaded with the image copy, detours to the Environmental Shopping Center: one card per env var hops onto the container roof -> truck drives up the corridor between warehouse and factories to the plot -> copy unloaded, cards hop to the door queue; on start they are pinned to the front wall. Without a truck (tests) cards fly straight to the door |
 | Container create | A copy of the image's container hops out of the warehouse row (the original stays) onto the deploy truck at its bay -> (with env vars: via the Environmental Shopping Center for the cards) -> the truck drives along the lane south of the plot row (rounded-corner routes from `layout.ts` that never cut through buildings) -> the copy is unloaded onto the plot -> the factory rises around it while the truck turns and drives back to the bay (one truck: deliveries queue) (the copy stays inside as the rootfs) -> image arc drawn. Planned: crew walks from warehouse with blueprint -> foundation + fences rise -> crates carried in and **unboxed**: lids pop, contents settle as stacked translucent layers -> glass upper floor slides on top -> watchman hut appears |
 | Container start | Lights on floor by floor, smokestack starts, meters come alive, driveway opens to the road |
@@ -303,12 +322,13 @@ Planned, not yet implemented. Do not start these until confirmed.
 - [x] Secured Locker Yard (barred fence, single gate)
 - [x] Three storage types: volumes, host paths, scratch space (tmpfs)
 - [x] systemd Business Center moved outside the Podman perimeter
-- [x] Simulation split into replayable steps: pull, network, deploy, env, migrate, expose, storage, Containerfile, quadlet, metrics
+- [x] Simulation split into replayable steps: pull, network, deploy, env, expose, storage, migrate, metrics, Containerfile, Compose, quadlet
 - [x] Networks as conveyor belts in the Factory District; containers hooked on at start
 - [x] R&D Department: Containerfile + `podman build` delivering a custom image
-- [x] Quadlet Department: `web.container` unit file, generated `web.service` in systemd
+- [x] Quadlet Department: `web`, `api` and `db` `.container` unit files, deployed as pavilions beside systemd; each generated `.service` adds a tower floor
 - [x] One-off `db-migrate` container (`--rm`) from the db image, talking to `db` over the belt
 - [x] `metrics-collector` from the UBI image with `--restart=always`, restarting every 10 s
+- [x] Compose: `compose.yaml` blueprint stand that redeploys web, db, api and metrics
 - [ ] Container unboxing (crates from shelf stacked as layers)
 - [ ] Pod campus and OpenShift shipping choreographies
 - [ ] Full inspector and guided tour

@@ -102,6 +102,10 @@ export function applyEvent(state: PodmanState, e: SimEvent): void {
       state.images.set(e.image, { ref: e.image, layers: [...e.layers], complete: true });
       break;
     case 'image.build.start':
+    case 'image.build.stage':
+      break;
+    case 'image.build.discard':
+      for (const l of e.layers) state.layers.delete(l);
       break;
     case 'image.pull.done': {
       const img = state.images.get(e.image);

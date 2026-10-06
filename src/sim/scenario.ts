@@ -51,13 +51,33 @@ export function defaultSteps(seed = 42): Step[] {
     { name: 'POSTGRESQL_PASSWORD', value: '', secret: true, secretName: PG_SECRET },
   ];
 
+  // podcity-api starts from plain UBI and installs nginx itself.
   const containerfile = [
-    `FROM ${NGINX}`,
-    'COPY site/ /opt/app-root/src/',
-    'COPY podcity.conf /opt/app-root/etc/nginx.d/',
+    `FROM ${UBI}`,
+    'RUN dnf -y install nginx && dnf clean all',
+    'COPY site/ /usr/share/nginx/html/',
+    'COPY podcity.conf /etc/nginx/conf.d/',
     'CMD nginx -g "daemon off;"',
   ];
-  const customLayers: Digest[] = [shortDigest(rng), shortDigest(rng)]; // one per COPY; CMD is metadata only
+  const copyLayers: Digest[] = [shortDigest(rng), shortDigest(rng)]; // one per COPY; CMD is metadata only
+  const builderLayers: Digest[] = [shortDigest(rng), shortDigest(rng)]; // builder stage: COPY sources, RUN the build
+  const customLayers: Digest[] = [shortDigest(rng), ...copyLayers]; // RUN (nginx), then the two COPYs
+
+  // Compose rebuilds podcity-api with a multi-stage Containerfile: a UBI builder stage compiles the site, the
+  // final stage (UBI + nginx, as before) copies only the result. The output is byte-identical to the site/ shipped before, so the
+  // final layers keep their digests and the result is the same podcity-api image.
+  const multiStage = [
+    `FROM ${UBI} AS builder`,
+    'WORKDIR /src',
+    'COPY . /src',
+    'RUN dnf -y install nodejs npm && npm ci && npm run build',
+    '',
+    `FROM ${UBI}`,
+    'RUN dnf -y install nginx && dnf clean all',
+    'COPY --from=builder /src/dist/ /usr/share/nginx/html/',
+    'COPY podcity.conf /etc/nginx/conf.d/',
+    'CMD nginx -g "daemon off;"',
+  ];
 
   const migrateMounts: Mount[] = [{ kind: 'bind', source: '/home/user/migrations', target: '/migrations', readOnly: true }];
   const migrateEnv: EnvVar[] = [
@@ -83,6 +103,7 @@ export function defaultSteps(seed = 42): Step[] {
     `      - { source: ${PG_SECRET}, type: env, target: POSTGRESQL_PASSWORD }`,
     '  api:',
     `    image: ${CUSTOM}`,
+    '    build: { context: ., dockerfile: Containerfile }',
     '    container_name: podcity-api',
     '    networks: [backend]',
     '  web:',
@@ -255,22 +276,32 @@ export function defaultSteps(seed = 42): Step[] {
       at(0.3, { type: 'network.connect', container: 'metrics-1', network: NET, ports: [] });
     }),
 
-    step('build', 'Containerfile', 'The R&D department writes a Containerfile FROM the UBI nginx image. podman build reuses all of its layers, commits one new layer per COPY, and delivers podcity-api to the warehouse. It is then deployed as a container on backend like any other image.', (at) => {
-      at(0, { type: 'image.build.start', image: CUSTOM, base: NGINX, containerfile });
+    step('build', 'Containerfile', 'The R&D department writes a Containerfile FROM ubi:latest. The crane brings a copy of the UBI image over from the warehouse as the starting point: its layer is reused, not copied. RUN installs nginx and each COPY adds the site and its config, one new layer each; they are packed into the UBI copy, which becomes podcity-api and goes back to the warehouse. It is then deployed as a container on backend like any other image.', (at) => {
+      at(0, { type: 'image.build.start', image: CUSTOM, base: UBI, containerfile });
       containerfile
-        .filter((line) => line.startsWith('COPY'))
+        .filter((line) => /^(RUN|COPY)\s/.test(line))
         .forEach((instruction, i) => at(1.5, { type: 'image.build.layer', image: CUSTOM, instruction, layer: customLayers[i]! }));
-      at(1.5, { type: 'image.build.done', image: CUSTOM, layers: [...nginxLayers, ...customLayers] });
+      at(1.5, { type: 'image.build.done', image: CUSTOM, layers: [...ubiLayers, ...customLayers] });
       // The truck waits for the image to reach the warehouse, then deploys it like any other.
       at(1, { type: 'container.create', id: 'api-1', name: 'podcity-api', image: CUSTOM, mounts: [], env: [] });
       at(3.5, { type: 'container.start', id: 'api-1' });
       at(0.3, { type: 'network.connect', container: 'api-1', network: NET, ports: [] });
     }),
 
-    step('compose', 'Compose', 'A blueprint stand by the service road holds compose.yaml: the whole stack (db, podcity-api, web, metrics-collector) with its network, volume, secret, ports and mounts in one file. podman compose up --force-recreate redeploys every service from it at once: three more trucks join the deploy truck, one per service.', (at) => {
+    step('compose', 'Compose', 'A blueprint stand by the service road holds compose.yaml: the whole stack (db, podcity-api, web, metrics-collector) with its network, volume, secret, ports and mounts in one file. podman compose up --build --force-recreate first rebuilds podcity-api in R&D with a multi-stage Containerfile: the crane brings a UBI builder, the build runs on it, the final stage (UBI + nginx again) takes only the result and the builder is dumped, then a fresh UBI copy is craned in for the final stage. The layers come out identical, so it is the same podcity-api image. Then every service is redeployed at once: three more trucks join the deploy truck, one per service.', (at) => {
       at(0, { type: 'compose.up', project: PROJECT, path: '~/podcity/compose.yaml', lines: composeFile, services: composeStack.map((c) => c.create.name) });
-      // The whole stack at once: four trucks, one per service.
-      composeStack.forEach((c, i) => at(i === 0 ? 1.5 : 0.1, { type: 'container.remove', id: c.old }));
+      // --build: podcity-api is rebuilt first, multi-stage.
+      at(1, { type: 'image.build.start', image: CUSTOM, base: UBI, containerfile: multiStage });
+      at(1, { type: 'image.build.stage', image: CUSTOM, stage: 'builder', base: UBI });
+      at(1.5, { type: 'image.build.layer', image: CUSTOM, stage: 'builder', instruction: 'COPY . /src', layer: builderLayers[0]! });
+      at(1.5, { type: 'image.build.layer', image: CUSTOM, stage: 'builder', instruction: multiStage[3]!, layer: builderLayers[1]! });
+      at(1.5, { type: 'image.build.layer', image: CUSTOM, instruction: multiStage[6]!, layer: customLayers[0]! });
+      at(1.5, { type: 'image.build.layer', image: CUSTOM, from: 'builder', instruction: multiStage[7]!, layer: customLayers[1]! });
+      at(0.5, { type: 'image.build.discard', image: CUSTOM, stage: 'builder', layers: builderLayers });
+      at(1.5, { type: 'image.build.layer', image: CUSTOM, instruction: multiStage[8]!, layer: customLayers[2]! });
+      at(1.5, { type: 'image.build.done', image: CUSTOM, layers: [...ubiLayers, ...customLayers] });
+      // Then the whole stack at once: four trucks, one per service (the director holds them until the build is in).
+      composeStack.forEach((c, i) => at(i === 0 ? 1.5 : 0.1, { type: 'container.remove', id: c.old, compose: PROJECT }));
       composeStack.forEach((c, i) => at(i === 0 ? 0.5 : 0.4, c.create));
       composeStack.forEach((c, i) => at(i === 0 ? 3.5 : 0.1, { type: 'container.start', id: c.create.id }));
       composeStack.forEach((c) => at(0.1, { type: 'network.connect', container: c.create.id, network: NET, ports: c.ports }));
@@ -292,5 +323,14 @@ function step(id: StepId, title: string, summary: string, build: (at: (dt: numbe
     t += dt;
     events.push({ at: t, event });
   });
+  // --network and -p are given at create time: copy them from the container's network.connect onto its create.
+  for (const { event } of events) {
+    if (event.type !== 'container.create') continue;
+    const connect = events.find((x) => x.event.type === 'network.connect' && x.event.container === event.id)?.event;
+    if (connect?.type === 'network.connect') {
+      event.network = connect.network;
+      event.ports = connect.ports;
+    }
+  }
   return { id, title, summary, events };
 }

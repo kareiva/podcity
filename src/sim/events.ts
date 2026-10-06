@@ -30,7 +30,12 @@ export type SimEvent =
   | { type: 'image.pull.done'; image: string }
   // podman build: the base comes from local storage; each layer-creating instruction commits one layer
   | { type: 'image.build.start'; image: string; base: string; containerfile: string[] }
-  | { type: 'image.build.layer'; image: string; instruction: string; layer: Digest }
+  // Multi-stage: `FROM base AS stage` starts an intermediate stage; its layers carry `stage`.
+  // `COPY --from=stage` commits a final-stage layer taken from that stage (`from`).
+  | { type: 'image.build.stage'; image: string; stage: string; base: string }
+  | { type: 'image.build.layer'; image: string; instruction: string; layer: Digest; stage?: string; from?: string }
+  // The intermediate stage is thrown away once the final stage has taken what it needs.
+  | { type: 'image.build.discard'; image: string; stage: string; layers: Digest[] }
   | { type: 'image.build.done'; image: string; layers: Digest[] }
   // autoRemove: `podman run --rm`, a one-off container removed as soon as it exits. command overrides the image's CMD.
   // restart: `--restart=always`, podman starts it again whenever it exits.
@@ -48,12 +53,15 @@ export type SimEvent =
       restart?: 'always';
       runFor?: number;
       compose?: string; // compose project that (re)created it
+      // Create-time flags `--network` and `-p`; the connection itself is announced by network.connect when it starts.
+      network?: string;
+      ports?: Port[];
     }
   // restart: started again by its restart policy rather than by `podman start`
   | { type: 'container.start'; id: string; restart?: boolean }
   | { type: 'container.stop'; id: string }
   | { type: 'container.exit'; id: string; code: number; reason?: string }
-  | { type: 'container.remove'; id: string }
+  | { type: 'container.remove'; id: string; compose?: string } // compose: removed by `compose up` to recreate it
   | { type: 'secret.create'; name: string } // `podman secret create`; contents never leave the facility
   | { type: 'volume.create'; name: string }
   | { type: 'volume.remove'; name: string }

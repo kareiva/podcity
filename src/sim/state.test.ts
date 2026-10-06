@@ -73,10 +73,10 @@ describe('default steps', () => {
     expect(s.containers.get('db-4')?.env.map((e) => e.name)).toContain('POSTGRESQL_PASSWORD');
     expect(s.compose.get('podcity')?.services.sort()).toEqual(['db', 'metrics-collector', 'podcity-api', 'web']);
     expect(s.containers.get('web-4')?.mounts.map((m) => m.kind).sort()).toEqual(['bind', 'tmpfs']);
-    const nginx = s.images.get('registry.access.redhat.com/ubi9/nginx-124:latest')!;
+    const ubi = s.images.get('registry.access.redhat.com/ubi9/ubi:latest')!;
     const custom = s.images.get('localhost/podcity-api:1.0')!;
-    expect(custom.layers.slice(0, nginx.layers.length)).toEqual(nginx.layers); // built FROM nginx: its layers reused
-    expect(custom.layers).toHaveLength(nginx.layers.length + 2); // one per COPY
+    expect(custom.layers.slice(0, ubi.layers.length)).toEqual(ubi.layers); // built FROM ubi: its layer reused
+    expect(custom.layers).toHaveLength(ubi.layers.length + 3); // RUN nginx + one per COPY
     expect(s.containers.has('migrate-1')).toBe(false); // --rm
     expect(s.images.size).toBe(4); // the one-off left its image behind
     expect(s.quadlets.get('web.container')).toMatchObject({ image: 'registry.access.redhat.com/ubi9/nginx-124:latest', unit: 'web.service' });
@@ -150,6 +150,34 @@ describe('default steps', () => {
     expect(sim.state.containers.get('metrics-2')!.status).toBe('exited');
     sim.update(100 + 11.5);
     expect(sim.state.containers.get('metrics-2')!.status).toBe('running');
+  });
+
+  it('rebuilds podcity-api multi-stage in compose: builder discarded, same image as before', () => {
+    const steps = defaultSteps();
+    const compose = steps.findIndex((s) => s.id === 'compose');
+    const sim = new Simulator(new EventBus(), steps);
+    sim.fastForward(compose);
+    const before = [...sim.state.images.get('localhost/podcity-api:1.0')!.layers];
+    const layersBefore = new Set(sim.state.layers);
+    sim.fastForward(compose + 1);
+    const events = steps[compose]!.events.map((e) => e.event);
+    const discard = events.find((e) => e.type === 'image.build.discard');
+    expect(discard).toMatchObject({ stage: 'builder' });
+    for (const l of (discard as Extract<typeof discard, { type: 'image.build.discard' }>).layers) expect(sim.state.layers.has(l)).toBe(false);
+    expect(sim.state.images.get('localhost/podcity-api:1.0')!.layers).toEqual(before);
+    expect(sim.state.layers).toEqual(layersBefore);
+    // Nothing is recreated before the build is done.
+    const done = events.findIndex((e) => e.type === 'image.build.done');
+    expect(events.findIndex((e) => e.type === 'container.remove')).toBeGreaterThan(done);
+  });
+
+  it('puts --network and -p on the create in the expose step, as podman takes them at create time', () => {
+    const expose = defaultSteps().find((s) => s.id === 'expose')!.events.map((e) => e.event);
+    expect(expose.find((e) => e.type === 'container.create')).toMatchObject({
+      id: 'web-2',
+      network: 'backend',
+      ports: [{ host: 8080, container: 8080, protocol: 'tcp' }],
+    });
   });
 
   it('creates the pgpass secret before db uses it as --secret for its password', () => {

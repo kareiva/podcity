@@ -56,7 +56,7 @@ describe('Director fast-forward', () => {
     expect(k.get('port')).toHaveLength(1);
     expect(k.get('secret')?.sort()).toEqual(['env:db-4:POSTGRESQL_PASSWORD', 'secret:pgpass']); // sealed card + the secret itself
     expect(k.get('env var')).toHaveLength(2);
-    expect(k.get('layer')).toHaveLength(7); // ubi, nginx-124, postgresql-16 share UBI/s2i-core; podcity-api adds 2 on top of nginx
+    expect(k.get('layer')).toHaveLength(8); // ubi, nginx-124, postgresql-16 share UBI/s2i-core; podcity-api adds 3 on top of ubi (rebuild adds none)
     expect(k.get('image')).toHaveLength(4);
     // Images are kept as their shipping containers; every factory holds a copy of its image's container.
     scene.traverse((o) => {

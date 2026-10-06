@@ -80,6 +80,25 @@ interface Factory {
   networks: Set<string>; // networks it is hooked onto with a feeder
 }
 
+/** An image being built in R&D: its final base, the crates committed on the bench, and the base's copy once fetched. */
+interface Build {
+  base: string;
+  crates: THREE.Mesh[];
+  stagesLeft: number; // intermediate stages still to finish before the final base can take the yard
+  baseCopy?: Promise<{ cargo: THREE.Group; releaseYard: () => void }>;
+}
+
+/** Intermediate stage of a multi-stage build: its base's container in the R&D yard, with the stage's crates on top. */
+interface BuildStage {
+  cargo: THREE.Group;
+  crates: THREE.Mesh[];
+  releaseYard: () => void;
+}
+
+function stageKey(image: string, stage: string): string {
+  return `${image}#${stage}`;
+}
+
 /** A deploy truck and the bay it parks at. */
 interface Truck {
   truck: THREE.Object3D;
@@ -120,7 +139,7 @@ export class Director {
   private factories = new Map<string, Factory>();
   private manifests = new Map<string, THREE.Group>(); // image ref -> its container, kept in the warehouse
   private imageSlots = new Map<string, number>(); // image ref -> reserved row slot in the warehouse
-  private imageStored = new Map<string, { done: Promise<void>; resolve: () => void }>(); // pulls/builds in flight
+  private imageStored = new Map<string, { done: Promise<void>; resolve: () => void; settled: boolean }>(); // pulls/builds in flight
   private imageLayers = new Map<string, string[]>(); // image ref -> layer digests
   private selectedImage: string | null = null;
   private crates = new Map<string, THREE.Mesh>();
@@ -137,7 +156,9 @@ export class Director {
   private secrets = new Map<string, THREE.Mesh>(); // podman secret -> plaque at the Secret Facility
   private units = new Map<string, THREE.Mesh>(); // generated systemd unit -> plate on the tower
   private trafficPaths = new Map<string, ReturnType<typeof pathSampler>>(); // `net|a|b` -> feeder-belt-feeder path
-  private builds = new Map<string, { base: string; crates: THREE.Mesh[] }>(); // image being built in R&D
+  private builds = new Map<string, Build>(); // image being built in R&D
+  private stages = new Map<string, BuildStage>(); // `image#stage` -> intermediate stage standing in the R&D yard
+  private containerfiles = new Map<string, THREE.Group>(); // image -> its Containerfile on the R&D board
   private crateCount = 0;
 
   private readonly box = new THREE.BoxGeometry(1, 1, 1);
@@ -158,7 +179,9 @@ export class Director {
     bus.on('image.layer.done', (e) => this.enqueue(`image:${e.image}`, () => this.shelveLayer(e)));
     bus.on('image.pull.done', (e) => this.enqueue(`image:${e.image}`, () => this.pullDone(e)));
     bus.on('image.build.start', (e) => this.enqueue(`image:${e.image}`, () => this.writeContainerfile(e)));
+    bus.on('image.build.stage', (e) => this.enqueue(`image:${e.image}`, () => this.fetchStageBase(e)));
     bus.on('image.build.layer', (e) => this.enqueue(`image:${e.image}`, () => this.commitLayer(e)));
+    bus.on('image.build.discard', (e) => this.enqueue(`image:${e.image}`, () => this.discardStage(e)));
     bus.on('image.build.done', (e) => this.enqueue(`image:${e.image}`, () => this.deliverBuild(e)));
     bus.on('quadlet.create', (e) => this.enqueue(`quadlet:${e.file}`, () => this.writeQuadlet(e)));
     bus.on('systemd.daemon-reload', (e) => {
@@ -185,7 +208,12 @@ export class Director {
       ),
     );
     bus.on('network.request', (e) => this.enqueue(this.site(e.from), () => this.sendRequest(e)));
-    bus.on('container.remove', (e) => this.enqueue(this.site(e.id), () => this.demolishFactory(e.id)));
+    bus.on('container.remove', (e) =>
+      this.enqueue(this.site(e.id), async () => {
+        if (e.compose) await this.buildsDone();
+        await this.demolishFactory(e.id);
+      }),
+    );
     bus.on('network.create', (e) => this.enqueue(`network:${e.name}`, () => this.buildBelt(e)));
     bus.on('network.connect', (e) =>
       this.enqueue(this.site(e.container), async () => {
@@ -207,7 +235,7 @@ export class Director {
     this.scene.add(this.root);
     this.arcs = new ArcLayer(this.root, this.tw);
     this.layerArcs = new ArcLayer(this.root, this.tw);
-    for (const m of [this.names, this.plots, this.factories, this.manifests, this.imageSlots, this.imageStored, this.imageLayers, this.crates, this.lockers, this.hostPaths, this.cargo, this.locks, this.spotRelease, this.belts, this.builds, this.quadlets, this.composeStands, this.secrets, this.units, this.trafficPaths])
+    for (const m of [this.names, this.plots, this.factories, this.manifests, this.imageSlots, this.imageStored, this.imageLayers, this.crates, this.lockers, this.hostPaths, this.cargo, this.locks, this.spotRelease, this.belts, this.builds, this.stages, this.containerfiles, this.quadlets, this.composeStands, this.secrets, this.units, this.trafficPaths])
       m.clear();
     this.selectedImage = null;
     this.crateCount = 0;
@@ -454,13 +482,15 @@ export class Director {
     const hoist = slew?.getObjectByName('hoist');
     if (slew && hoist) {
       const hook = hoist.getObjectByName('hook')!;
-      const pick = CRANE_HEIGHT - CARGO.h - 0.3; // hook block resting on the container roof
+      // Hook block resting on the container roof: where it stands now (it may sit on top of another), then on the ground.
+      const pick = CRANE_HEIGHT - (cargo.position.y + CARGO.h / 2);
+      const drop = CRANE_HEIGHT - CARGO.h - 0.3;
       await this.slewTo(slew, craneYaw(spec, spec.from), 1);
       await this.hoistTo(hoist, pick, 1);
       hook.attach(cargo);
       await this.hoistTo(hoist, HOIST_CARRY, 1);
       await this.slewTo(slew, craneYaw(spec, spec.to), 2.4);
-      await this.hoistTo(hoist, pick, 1);
+      await this.hoistTo(hoist, drop, 1);
       this.root.attach(cargo);
       void this.hoistTo(hoist, HOIST_REST, 0.8);
     }
@@ -523,10 +553,16 @@ export class Director {
   }
 
   private expectImage(ref: string): void {
-    if (this.imageStored.has(ref)) return;
+    if (this.imageStored.get(ref)?.settled === false) return; // already expected; a rebuild expects it afresh
     let resolve!: () => void;
     const done = new Promise<void>((r) => (resolve = r));
-    this.imageStored.set(ref, { done, resolve });
+    const entry = { done, resolve: () => ((entry.settled = true), resolve()), settled: false };
+    this.imageStored.set(ref, entry);
+  }
+
+  /** Resolves once no pull or build is in flight. */
+  private async buildsDone(): Promise<void> {
+    await Promise.all([...this.imageStored.values()].map((s) => s.done));
   }
 
   /** Resolves once the image's container is in the warehouse (immediately for images never pulled or built). */
@@ -570,17 +606,38 @@ export class Director {
 
   /** The Containerfile is pinned up in R&D; FROM resolves to the local base image, whose crates flash. */
   private async writeContainerfile(e: EventOf<'image.build.start'>): Promise<void> {
-    this.builds.set(e.image, { base: e.base, crates: [] });
-    await this.pinDocument(rndLab().board, e.containerfile, {
+    // Every FROM but the last starts an intermediate stage, announced by its own event.
+    const build: Build = { base: e.base, crates: [], stagesLeft: e.containerfile.filter((l) => /^FROM\s/i.test(l)).length - 1 };
+    this.builds.set(e.image, build);
+    const old = this.containerfiles.get(e.image); // a rebuild replaces the previous Containerfile
+    if (old) await this.vanish(old);
+    const sheet = await this.pinDocument(rndLab().board, e.containerfile, {
       key: keys.build(e.image),
       kind: 'containerfile',
       name: `Containerfile · ${shortRef(e.image)}`,
     });
+    this.containerfiles.set(e.image, sheet);
 
     await this.whenImage(e.base);
     const reused = (this.imageLayers.get(e.base) ?? []).flatMap((l) => this.crates.get(l) ?? []);
     const base = this.manifests.get(e.base)?.getObjectByName('shell');
     await Promise.all([...reused.map((c) => this.flash(c)), ...(base instanceof THREE.Mesh ? [this.flash(base)] : [])]);
+    if (build.stagesLeft <= 0) this.fetchFinalBase(e.image, build);
+  }
+
+  /**
+   * FROM of the final stage: a copy of the base image's container is craned
+   * over to the R&D yard (in the background, so layers can be committed
+   * meanwhile); the new layers are packed into it, and it becomes the image.
+   * With intermediate stages it waits until they have left the yard.
+   */
+  private fetchFinalBase(image: string, build: Build): void {
+    if (build.baseCopy) return;
+    build.baseCopy = this.fetchBase(build.base, `FROM ${shortRef(build.base)} → ${shortRef(image)}`, {
+      key: `stage:${stageKey(image, '')}`,
+      kind: 'build stage',
+      name: `${shortRef(image)} being built · FROM ${shortRef(build.base)}`,
+    });
   }
 
   /** A text document (Containerfile, unit file) pinned on a board, its text floating above. */
@@ -605,56 +662,282 @@ export class Director {
     return sheet;
   }
 
-  /** A layer-creating instruction (COPY, RUN) commits a new crate on the lab bench. */
+  /**
+   * A layer-creating instruction (COPY, RUN) commits a new crate. In an
+   * intermediate stage it lands on that stage's container in the yard;
+   * otherwise on the lab bench, coming from the stage for `COPY --from`.
+   * A layer identical to one already in storage keeps its digest: the bench
+   * crate is a stand-in that merges with the shelved one on delivery.
+   */
   private async commitLayer(e: EventOf<'image.build.layer'>): Promise<void> {
     const build = this.builds.get(e.image);
     if (!build) return;
     const { building } = rndLab();
+    const fromLab = new THREE.Vector3(building.x, 3, building.z);
+    const stage = e.stage ? this.stages.get(stageKey(e.image, e.stage)) : undefined;
+    if (stage) {
+      const crate = this.mesh(imageColor(stageKey(e.image, e.stage!)));
+      crate.scale.setScalar(2.2);
+      tag(crate, { key: keys.layer(e.layer), kind: 'layer', name: `${e.layer} · ${e.stage} stage · ${e.instruction}` });
+      this.root.add(crate);
+      const n = stage.crates.length;
+      stage.crates.push(crate);
+      const onTop = stage.cargo.position.clone().add(new THREE.Vector3(-1.4 + n * 2.8, CARGO.h / 2 + 1.1, 0));
+      await this.hop(crate, fromLab, onTop, 0.9, 3);
+      stage.cargo.attach(crate);
+      return;
+    }
+    const source = e.from ? this.stages.get(stageKey(e.image, e.from)) : undefined;
     const slot = labBenchSlot(build.crates.length);
     const crate = this.mesh(imageColor(e.image));
     crate.scale.setScalar(2.4);
+    crate.userData.layer = e.layer;
     tag(crate, { key: keys.layer(e.layer), kind: 'layer', name: `${e.layer} · ${shortRef(e.image)} · ${e.instruction}` });
     this.root.add(crate);
-    this.crates.set(e.layer, crate);
+    if (!this.crates.has(e.layer)) this.crates.set(e.layer, crate);
     build.crates.push(crate);
-    await this.hop(crate, new THREE.Vector3(building.x, 3, building.z), new THREE.Vector3(slot.x, 1.5, slot.z), 0.9, 3);
+    if (source) {
+      // COPY --from: the stage's result comes off its container, onto the bench.
+      const from = source.cargo.position.clone().setY(0.3 + CARGO.h + 1.2);
+      crate.position.copy(from);
+      crate.scale.setScalar(0.01); // appears out of the stage once it has flashed
+      const last = source.crates.at(-1);
+      if (last) await this.flash(last);
+      crate.scale.setScalar(0.8);
+      await this.hop(crate, from, new THREE.Vector3(slot.x, 1.5, slot.z), 1, 4);
+      await this.tw.tween({ duration: 0.3, update: (k) => crate.scale.setScalar(0.8 + 1.6 * k) });
+      return;
+    }
+    const based = build.stagesLeft <= 0 && build.baseCopy ? await build.baseCopy : undefined;
+    if (based) {
+      await this.stackOnBase(based.cargo, crate, build.crates.length - 1, fromLab);
+      return;
+    }
+    await this.hop(crate, fromLab, new THREE.Vector3(slot.x, 1.5, slot.z), 0.9, 3);
+  }
+
+  /** The n-th new layer lands on the roof of the base image's copy in the yard: the image grows on top of its base. */
+  private async stackOnBase(base: THREE.Group, crate: THREE.Mesh, n: number, from: THREE.Vector3): Promise<void> {
+    const size = 1.8;
+    const at = base.position.clone().add(new THREE.Vector3(-2 + (n % 3) * 2, CARGO.h / 2 + size / 2 + Math.floor(n / 3) * size, 0));
+    await this.hop(crate, from, at, 0.9, 3);
+    crate.scale.setScalar(size);
+    crate.userData.onBase = true;
+  }
+
+  /**
+   * The new layers on the base's roof come together and a container in the
+   * image's color forms round them, standing on top of the base copy.
+   */
+  private async formImage(image: string, base: THREE.Group, crates: THREE.Mesh[]): Promise<THREE.Group> {
+    const [x, z] = buildWaypoints[0]!;
+    const cargo = this.makeCargo(image, [x, z]);
+    cargo.position.set(base.position.x, base.position.y + CARGO.h, base.position.z);
+    cargo.scale.setScalar(0.01);
+    const gap = Math.min(2.8, 5.6 / Math.max(crates.length, 1));
+    const size = Math.min(2.2, gap - 0.2);
+    await Promise.all(
+      crates.map(async (crate, i) => {
+        const to = cargo.position.clone().add(new THREE.Vector3((i - (crates.length - 1) / 2) * gap, 0, 0));
+        await this.hop(crate, crate.position.clone(), to, 0.5, 1, i * 0.1);
+        crate.scale.setScalar(size);
+      }),
+    );
+    await this.popIn(cargo);
+    for (const crate of crates) cargo.attach(crate); // inside it now, carried to the warehouse
+    return cargo;
+  }
+
+  /** The base copy has served its purpose: it bursts into flame and fragments and is gone. */
+  private async explode(obj: THREE.Group): Promise<void> {
+    const center = obj.position.clone();
+    const color = ((obj.getObjectByName('shell') as THREE.Mesh | undefined)?.material as THREE.MeshStandardMaterial | undefined)?.color.getHex() ?? palette.error;
+    const fire = new THREE.Mesh(
+      new THREE.SphereGeometry(1, 12, 8),
+      new THREE.MeshBasicMaterial({ color: 0xff7a1a, transparent: true, opacity: 0.9, depthWrite: false }),
+    );
+    fire.position.copy(center);
+    fire.raycast = () => {};
+    this.root.add(fire);
+    // Fragments fly out on fixed, evenly spread headings (deterministic, so replays look the same).
+    const bits = Array.from({ length: 14 }, (_, i) => {
+      const bit = this.mesh(i % 3 === 0 ? 0xffb020 : color);
+      const s = 0.4 + ((i * 7) % 5) * 0.12;
+      bit.scale.set(s, s * 0.6, s);
+      bit.position.copy(center);
+      bit.raycast = () => {};
+      this.root.add(bit);
+      const yaw = i * 2.39996; // golden angle
+      const speed = 5 + ((i * 3) % 4);
+      return { bit, s, v: new THREE.Vector3(Math.cos(yaw) * speed, 7 + ((i * 5) % 6), Math.sin(yaw) * speed) };
+    });
+    obj.visible = false;
+    for (const label of obj.children.filter((c) => c instanceof CSS2DObject)) this.dispose(label);
+    const fireMat = fire.material;
+    await this.tw.tween({
+      duration: 1.4,
+      ease: ease.linear,
+      update: (k) => {
+        const t = k * 1.4;
+        fire.scale.setScalar(1 + 4 * Math.sqrt(k));
+        fireMat.opacity = 0.9 * (1 - k);
+        fireMat.color.setRGB(1, 0.48 * (1 - k) + 0.1, 0.1 * (1 - k));
+        for (const { bit, s, v } of bits) {
+          bit.position.set(center.x + v.x * t, Math.max(center.y + v.y * t - 9.8 * t * t, 0.3), center.z + v.z * t);
+          bit.rotation.set(t * 5, t * 3, 0);
+          const fade = Math.max(k > 0.7 ? (1 - k) / 0.3 : 1, 0.01);
+          bit.scale.set(s * fade, s * 0.6 * fade, s * fade);
+        }
+      },
+    });
+    for (const { bit } of bits) this.dispose(bit);
+    this.dispose(fire);
+    this.dispose(obj);
+  }
+
+  /**
+   * `FROM base AS stage`: the base image's container stays in the warehouse
+   * row; a copy goes to the unpacking spot and the R&D crane lifts it over to
+   * the R&D yard, where the stage's layers are committed on top of it.
+   */
+  private async fetchStageBase(e: EventOf<'image.build.stage'>): Promise<void> {
+    const { cargo, releaseYard } = await this.fetchBase(e.base, `${e.stage} · FROM ${shortRef(e.base)}`, {
+      key: `stage:${stageKey(e.image, e.stage)}`,
+      kind: 'build stage',
+      name: `${e.stage} stage of ${shortRef(e.image)} · FROM ${shortRef(e.base)} (intermediate)`,
+    });
+    this.stages.set(stageKey(e.image, e.stage), { cargo, crates: [], releaseYard });
+  }
+
+  /**
+   * The base image's container stays in the warehouse row (and flashes); a
+   * copy hops to the unpacking spot and the R&D crane lifts it over to the
+   * R&D yard. Holds the yard until the returned release is called.
+   */
+  private async fetchBase(base: string, text: string, info: EntityInfo): Promise<{ cargo: THREE.Group; releaseYard: () => void }> {
+    await this.whenImage(base);
+    const yard = buildWaypoints[0]!;
+    const spot = buildWaypoints.at(-1)!;
+    const releaseYard = await this.acquire(spotKey(yard));
+    const releaseSpot = await this.acquire(spotKey(spot));
+    const row = this.manifests.get(base);
+    const copy = this.makeShell(base);
+    if (row) {
+      copy.position.copy(row.position);
+      copy.rotation.copy(row.rotation);
+      const shell = row.getObjectByName('shell');
+      if (shell instanceof THREE.Mesh) void this.flash(shell);
+    } else {
+      copy.position.set(spot[0], 0.3 + CARGO.h / 2, spot[1]);
+    }
+    const label = makeLabel(text);
+    label.position.y = CARGO.h / 2 + 2.6;
+    copy.add(label);
+    tag(copy, info);
+    this.root.add(copy);
+    await this.placeOn(copy, new THREE.Vector3(spot[0], 0.3 + CARGO.h / 2, spot[1]), 0, 1);
+    // The build relay run backwards: unpacking spot -> R&D yard.
+    for (const spec of [...buildCranes].reverse()) {
+      const releaseCrane = await this.acquire(spec.name);
+      await this.craneLift({ ...spec, from: spec.to, to: spec.from }, copy);
+      releaseCrane();
+    }
+    releaseSpot();
+    return { cargo: copy, releaseYard };
+  }
+
+  /** The intermediate stage is not kept: its container tips into the skip behind the yard and is gone. */
+  private async discardStage(e: EventOf<'image.build.discard'>): Promise<void> {
+    const key = stageKey(e.image, e.stage);
+    const stage = this.stages.get(key);
+    if (!stage) return;
+    this.stages.delete(key);
+    const c = stage.cargo;
+    const from = c.position.clone();
+    const to = from.clone().add(new THREE.Vector3(0, -CARGO.h / 2, -5));
+    await this.tw.tween({
+      duration: 1.2,
+      update: (k) => {
+        c.position.lerpVectors(from, to, k);
+        c.position.y += Math.sin(k * Math.PI) * 2;
+        c.rotation.x = -1.2 * k; // tips over
+        c.scale.setScalar(Math.max(1 - k * k, 0.01));
+      },
+    });
+    this.dispose(c);
+    stage.releaseYard();
+    const build = this.builds.get(e.image);
+    if (build && --build.stagesLeft <= 0) this.fetchFinalBase(e.image, build); // the yard is free for the final stage's base
   }
 
   /** The new crates are packed into a container at R&D, craned to the warehouse and unpacked onto the shelves. */
   private async deliverBuild(e: EventOf<'image.build.done'>): Promise<void> {
     const build = this.builds.get(e.image);
     if (!build) return;
-    const releaseYard = await this.acquire(spotKey(buildWaypoints[0]!));
-    const cargo = this.makeCargo(e.image, buildWaypoints[0]!);
+    let cargo: THREE.Group;
+    let releaseYard: () => void;
+    const based = build.baseCopy ? await build.baseCopy : undefined;
     this.reserveImage(e.image, e.layers);
-    const lid = cargo.getObjectByName('lid')!;
-    await this.popIn(cargo);
-
-    // Lid up, crates in, lid down.
-    await this.tw.tween({ duration: 0.4, update: (k) => (lid.position.y = CARGO.h / 2 - 0.075 + 2.5 * k) });
-    await Promise.all(
-      build.crates.map(async (crate, i) => {
-        const to = cargo.position.clone().add(new THREE.Vector3(-1.4 + i * 2.8, 0, 0));
-        await this.hop(crate, crate.position.clone(), to, 0.6, 3, i * 0.15);
-        crate.scale.setScalar(2.2);
-        cargo.attach(crate);
-      }),
-    );
-    await this.tw.tween({ duration: 0.4, update: (k) => (lid.position.y = CARGO.h / 2 - 0.075 + 2.5 * (1 - k)) });
+    if (based) {
+      // Layers still on the bench (committed while a builder stage held the yard) join the others on the base's roof,
+      // then the new image's container forms on top of the base copy.
+      for (const [i, crate] of build.crates.entries())
+        if (!crate.userData.onBase) await this.stackOnBase(based.cargo, crate, i, crate.position.clone());
+      cargo = await this.formImage(e.image, based.cargo, build.crates);
+      releaseYard = () => {}; // the base copy still holds the yard until it is gone
+    } else {
+      releaseYard = await this.acquire(spotKey(buildWaypoints[0]!));
+      cargo = this.makeCargo(e.image, buildWaypoints[0]!);
+      await this.popIn(cargo);
+      const lid = cargo.getObjectByName('lid')!;
+      // Lid up, crates in, lid down.
+      const gap = Math.min(2.8, 5.6 / Math.max(build.crates.length, 1));
+      await this.tw.tween({ duration: 0.4, update: (k) => (lid.position.y = CARGO.h / 2 - 0.075 + 2.5 * k) });
+      await Promise.all(
+        build.crates.map(async (crate, i) => {
+          const to = cargo.position.clone().add(new THREE.Vector3((i - (build.crates.length - 1) / 2) * gap, 0, 0));
+          await this.hop(crate, crate.position.clone(), to, 0.6, 3, i * 0.15);
+          crate.scale.setScalar(Math.min(2.2, gap - 0.2));
+          cargo.attach(crate);
+        }),
+      );
+      await this.tw.tween({ duration: 0.4, update: (k) => (lid.position.y = CARGO.h / 2 - 0.075 + 2.5 * (1 - k)) });
+    }
 
     const releaseUnpack = await this.relay(cargo, buildWaypoints, buildCranes, releaseYard);
+    // The new image is in the warehouse: the base copy left in the yard is destroyed.
+    if (based) void this.explode(based.cargo).then(based.releaseYard);
     await this.openCargo(cargo);
     await Promise.all(
       build.crates.map(async (crate, i) => {
         this.root.attach(crate);
         crate.rotation.set(0, 0, 0);
+        const shelved = this.crates.get(crate.userData.layer as string);
+        if (shelved && shelved !== crate) {
+          // Same digest as a layer already in storage: nothing new to shelve.
+          await this.hop(crate, crate.position.clone(), shelved.position.clone(), 0.8, 4, i * 0.2);
+          this.dispose(crate);
+          await this.flash(shelved);
+          return;
+        }
         const slot = shelfSlot(this.crateCount++);
         await this.hop(crate, crate.position.clone(), new THREE.Vector3(slot.x, slot.y + 1.2, slot.z), 0.8, 4, i * 0.2);
         crate.scale.setScalar(2.4);
       }),
     );
     await this.closeCargo(cargo);
-    await this.storeImage(e.image, cargo);
+    const existing = this.manifests.get(e.image);
+    if (existing) {
+      // Rebuilt to identical layers: the same image, so the tag stays on the container already in the row.
+      await this.hop(cargo, cargo.position.clone(), existing.position.clone(), 1, 3);
+      this.cargo.delete(e.image);
+      this.dispose(cargo);
+      const shell = existing.getObjectByName('shell');
+      if (shell instanceof THREE.Mesh) await this.flash(shell);
+      this.imageStored.get(e.image)?.resolve();
+    } else {
+      await this.storeImage(e.image, cargo);
+    }
     releaseUnpack();
     const from = this.imageTop(build.base);
     if (from) await this.arcs.connect(keys.image(build.base), keys.image(e.image), from, this.imageTop(e.image)!, imageColor(build.base));
@@ -976,6 +1259,7 @@ export class Director {
     let plot = this.plots.get(e.name);
     if (plot === undefined) this.plots.set(e.name, (plot = this.plots.size));
     const slot = factorySlot(plot);
+    if (e.compose) await this.buildsDone(); // compose up --build: nothing is recreated until every image is built
     await this.whenImage(e.image); // the image's container must be in the warehouse to be copied
     const group = new THREE.Group();
     group.position.set(slot.x, 0.3, slot.z);

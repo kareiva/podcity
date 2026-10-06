@@ -4,6 +4,8 @@ import type { EventBus } from '../sim/bus';
 import type { EnvVar, SimEvent } from '../sim/events';
 
 const SPEEDS = [0.5, 1, 2, 4];
+/** Lines kept in the command log; older ones scroll away. */
+const FEED_LINES = 500;
 
 export function mountControls(root: HTMLElement, clock: SimClock, bus: EventBus, player: Player, mode: 'simulated' | 'live'): void {
   const bar = document.createElement('div');
@@ -58,16 +60,22 @@ export function mountControls(root: HTMLElement, clock: SimClock, bus: EventBus,
   panel.append(list, summary);
   root.append(panel);
 
+  // Terminal-style log of the current step only: cleared as each step starts (turn autoplay off to keep a
+  // finished step's log on screen). Oldest first, scrollable, follows new lines unless scrolled back.
   const feed = document.createElement('ol');
   feed.className = 'feed';
+  feed.setAttribute('aria-label', 'podman command log');
   root.append(feed);
 
-  const goTo = (i: number) => {
-    feed.replaceChildren();
-    void player.goTo(i);
-  };
+  const goTo = (i: number) => void player.goTo(i);
 
-  player.onLoop = () => feed.replaceChildren();
+  player.onStep((i) => {
+    const title = document.createElement('li');
+    title.className = 'comment';
+    title.textContent = `# ${i + 1}. ${player.steps[i]?.title ?? ''}`;
+    feed.replaceChildren(title);
+    feed.scrollTop = 0;
+  });
 
   const stepButtons = player.steps.map((s, i) => {
     const li = document.createElement('li');
@@ -95,10 +103,17 @@ export function mountControls(root: HTMLElement, clock: SimClock, bus: EventBus,
   autoBox.addEventListener('change', render);
 
   bus.on('*', (e) => {
+    if (player.fastForwarding) return; // earlier steps replayed instantly: not this step's log
+    const atBottom = feed.scrollHeight - feed.scrollTop - feed.clientHeight < 24;
+    const line = describe(e);
+    // Indented lines are what podman prints (stdout); the rest are commands typed in (stdin).
+    const output = line.startsWith('  ');
     const li = document.createElement('li');
-    li.textContent = describe(e);
-    feed.prepend(li);
-    while (feed.children.length > 12) feed.lastElementChild?.remove();
+    li.className = output ? 'stdout' : 'stdin';
+    li.textContent = output ? line.trimStart() : line;
+    feed.append(li);
+    while (feed.children.length > FEED_LINES) feed.firstElementChild?.remove();
+    if (atBottom) feed.scrollTop = feed.scrollHeight;
   });
 }
 
@@ -120,6 +135,13 @@ function mountFlag(m: Extract<SimEvent, { type: 'container.create' }>['mounts'][
   return ` -v ${m.source}:${m.target}${m.readOnly ? ':ro' : ''}`;
 }
 
+/** `--network`, `-p`, mounts and env, in the order podman's docs usually show them. */
+function createFlags(e: Extract<SimEvent, { type: 'container.create' }>): string {
+  const network = e.network ? ` --network ${e.network}` : '';
+  const ports = (e.ports ?? []).map((p) => ` -p ${p.host}:${p.container}${p.protocol === 'udp' ? '/udp' : ''}`).join('');
+  return `${network}${ports}${e.mounts.map(mountFlag).join('')}${e.env.map(envFlag).join('')}`;
+}
+
 /** Human-readable line, roughly the podman command that caused the event. */
 function describe(e: SimEvent): string {
   switch (e.type) {
@@ -127,14 +149,16 @@ function describe(e: SimEvent): string {
     case 'image.layer.done': return `  ${e.cached ? 'Copying blob' : 'Fetched blob'} ${e.layer}${e.cached ? ' skipped: already exists' : ''}`;
     case 'image.pull.done': return `  ${e.image} stored`;
     case 'image.build.start': return `podman build -t ${e.image} -f Containerfile .`;
-    case 'image.build.layer': return `  ${e.instruction} --> ${e.layer}`;
+    case 'image.build.stage': return `  [${e.stage}] FROM ${e.base} AS ${e.stage}`;
+    case 'image.build.layer': return `  ${e.stage ? `[${e.stage}] ` : ''}${e.instruction} --> ${e.layer}`;
+    case 'image.build.discard': return `  [${e.stage}] intermediate stage removed`;
     case 'image.build.done': return `  COMMIT ${e.image}`;
-    case 'compose.up': return `podman compose -f ${e.path} up -d --force-recreate  # ${e.services.join(', ')}`;
+    case 'compose.up': return `podman compose -f ${e.path} up -d --build --force-recreate  # ${e.services.join(', ')}`;
     case 'container.create':
       if (e.compose) return `  [${e.compose}] recreate ${e.name}`;
-      if (e.restart) return `podman run -d --restart=${e.restart} --name ${e.name}${e.mounts.map(mountFlag).join('')}${e.env.map(envFlag).join('')} ${e.image.split('/').pop()}${e.command ? ` ${e.command}` : ''}`;
-      if (e.autoRemove) return `podman run --rm --name ${e.name}${e.mounts.map(mountFlag).join('')}${e.env.map(envFlag).join('')} ${e.image.split('/').pop()}${e.command ? ` ${e.command}` : ''}`;
-      return `podman create --name ${e.name}${e.mounts.map(mountFlag).join('')}${e.env.map(envFlag).join('')} ${e.image.split('/').pop()}`;
+      if (e.restart) return `podman run -d --restart=${e.restart} --name ${e.name}${createFlags(e)} ${e.image.split('/').pop()}${e.command ? ` ${e.command}` : ''}`;
+      if (e.autoRemove) return `podman run --rm --name ${e.name}${createFlags(e)} ${e.image.split('/').pop()}${e.command ? ` ${e.command}` : ''}`;
+      return `podman create --name ${e.name}${createFlags(e)} ${e.image.split('/').pop()}`;
     case 'container.start': return e.restart ? `  ${e.id} restarted (--restart=always)` : `podman start ${e.id}`;
     case 'container.stop': return `podman stop ${e.id}`;
     case 'container.exit': return `  ${e.id} exited (${e.code})${e.reason ? `: ${e.reason}` : ''}`;

@@ -6,6 +6,7 @@ export type EntityKind =
   | 'layer'
   | 'image pull'
   | 'containerfile'
+  | 'build stage'
   | 'quadlet'
   | 'compose'
   | 'volume'
