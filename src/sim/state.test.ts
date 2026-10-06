@@ -152,7 +152,7 @@ describe('default steps', () => {
     expect(sim.state.containers.get('metrics-2')!.status).toBe('running');
   });
 
-  it('rebuilds podcity-api multi-stage in compose: builder discarded, same image as before', () => {
+  it('rebuilds podcity-api from cache in compose: same image, no new layers, nothing recreated before it', () => {
     const steps = defaultSteps();
     const compose = steps.findIndex((s) => s.id === 'compose');
     const sim = new Simulator(new EventBus(), steps);
@@ -161,14 +161,22 @@ describe('default steps', () => {
     const layersBefore = new Set(sim.state.layers);
     sim.fastForward(compose + 1);
     const events = steps[compose]!.events.map((e) => e.event);
-    const discard = events.find((e) => e.type === 'image.build.discard');
-    expect(discard).toMatchObject({ stage: 'builder' });
-    for (const l of (discard as Extract<typeof discard, { type: 'image.build.discard' }>).layers) expect(sim.state.layers.has(l)).toBe(false);
+    const cached = events.findIndex((e) => e.type === 'image.build.cached');
+    expect(cached).toBeGreaterThanOrEqual(0);
+    expect(events.some((e) => e.type === 'image.build.layer' || e.type === 'image.build.done')).toBe(false);
     expect(sim.state.images.get('localhost/podcity-api:1.0')!.layers).toEqual(before);
     expect(sim.state.layers).toEqual(layersBefore);
-    // Nothing is recreated before the build is done.
-    const done = events.findIndex((e) => e.type === 'image.build.done');
-    expect(events.findIndex((e) => e.type === 'container.remove')).toBeGreaterThan(done);
+    expect(events.findIndex((e) => e.type === 'container.remove')).toBeGreaterThan(cached);
+  });
+
+  it('brings db up first in compose; the rest depend on it', () => {
+    const events = defaultSteps().find((s) => s.id === 'compose')!.events.map((e) => e.event);
+    const creates = events.filter((e): e is Extract<typeof e, { type: 'container.create' }> => e.type === 'container.create');
+    expect(creates[0]).toMatchObject({ name: 'db' });
+    expect(creates[0]!.dependsOn).toBeUndefined();
+    for (const c of creates.slice(1)) expect(c.dependsOn).toEqual(['db']);
+    const dbStart = events.findIndex((e) => e.type === 'container.start' && e.id === creates[0]!.id);
+    expect(events.findIndex((e) => e === creates[1])).toBeGreaterThan(dbStart);
   });
 
   it('puts --network and -p on the create in the expose step, as podman takes them at create time', () => {

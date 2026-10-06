@@ -60,24 +60,8 @@ export function defaultSteps(seed = 42): Step[] {
     'CMD nginx -g "daemon off;"',
   ];
   const copyLayers: Digest[] = [shortDigest(rng), shortDigest(rng)]; // one per COPY; CMD is metadata only
-  const builderLayers: Digest[] = [shortDigest(rng), shortDigest(rng)]; // builder stage: COPY sources, RUN the build
   const customLayers: Digest[] = [shortDigest(rng), ...copyLayers]; // RUN (nginx), then the two COPYs
 
-  // Compose rebuilds podcity-api with a multi-stage Containerfile: a UBI builder stage compiles the site, the
-  // final stage (UBI + nginx, as before) copies only the result. The output is byte-identical to the site/ shipped before, so the
-  // final layers keep their digests and the result is the same podcity-api image.
-  const multiStage = [
-    `FROM ${UBI} AS builder`,
-    'WORKDIR /src',
-    'COPY . /src',
-    'RUN dnf -y install nodejs npm && npm ci && npm run build',
-    '',
-    `FROM ${UBI}`,
-    'RUN dnf -y install nginx && dnf clean all',
-    'COPY --from=builder /src/dist/ /usr/share/nginx/html/',
-    'COPY podcity.conf /etc/nginx/conf.d/',
-    'CMD nginx -g "daemon off;"',
-  ];
 
   const migrateMounts: Mount[] = [{ kind: 'bind', source: '/home/user/migrations', target: '/migrations', readOnly: true }];
   const migrateEnv: EnvVar[] = [
@@ -106,10 +90,12 @@ export function defaultSteps(seed = 42): Step[] {
     '    build: { context: ., dockerfile: Containerfile }',
     '    container_name: podcity-api',
     '    networks: [backend]',
+    '    depends_on: [db]',
     '  web:',
     `    image: ${NGINX}`,
     '    container_name: web',
     '    networks: [backend]',
+    '    depends_on: [db]',
     '    ports: ["8080:8080"]',
     '    volumes: [/home/user/site:/opt/app-root/src:ro]',
     '    tmpfs: [/var/lib/nginx/tmp]',
@@ -117,6 +103,7 @@ export function defaultSteps(seed = 42): Step[] {
     '    image: registry.access.redhat.com/ubi9/ubi:latest',
     '    container_name: metrics-collector',
     '    networks: [backend]',
+    '    depends_on: [db]',
     '    restart: always',
     `    command: ${metricsCommand}`,
     'networks:',
@@ -127,17 +114,17 @@ export function defaultSteps(seed = 42): Step[] {
     `  ${PG_SECRET}: { external: true }`,
   ];
   const PROJECT = 'podcity';
-  // Each old container is removed and a new one created from the same settings. Creates go out farthest
-  // plot first (db detours for its env cards and secret), so the trucks never pass each other on the lane.
+  // Each old container is removed and a new one created from the same settings. db goes first (the others
+  // depend on it); then the rest go out farthest plot first, so the trucks never pass each other on the lane.
   const composeStack: { old: string; create: Extract<SimEvent, { type: 'container.create' }>; ports: Port[] }[] = [
-    { old: 'api-1', create: { type: 'container.create', id: 'api-2', name: 'podcity-api', image: CUSTOM, mounts: [], env: [], compose: PROJECT }, ports: [] },
+    { old: 'db-3', create: { type: 'container.create', id: 'db-4', name: 'db', image: POSTGRES, mounts: dbMounts, env: dbEnv, compose: PROJECT }, ports: [] },
+    { old: 'api-1', create: { type: 'container.create', id: 'api-2', name: 'podcity-api', image: CUSTOM, mounts: [], env: [], compose: PROJECT, dependsOn: ['db'] }, ports: [] },
     {
       old: 'metrics-1',
-      create: { type: 'container.create', id: 'metrics-2', name: 'metrics-collector', image: UBI, mounts: [], env: [], restart: 'always', command: metricsCommand, runFor: METRICS_EVERY, compose: PROJECT },
+      create: { type: 'container.create', id: 'metrics-2', name: 'metrics-collector', image: UBI, mounts: [], env: [], restart: 'always', command: metricsCommand, runFor: METRICS_EVERY, compose: PROJECT, dependsOn: ['db'] },
       ports: [],
     },
-    { old: 'web-3', create: { type: 'container.create', id: 'web-4', name: 'web', image: NGINX, mounts: webMounts, env: [], compose: PROJECT }, ports: [webPort] },
-    { old: 'db-3', create: { type: 'container.create', id: 'db-4', name: 'db', image: POSTGRES, mounts: dbMounts, env: dbEnv, compose: PROJECT }, ports: [] },
+    { old: 'web-3', create: { type: 'container.create', id: 'web-4', name: 'web', image: NGINX, mounts: webMounts, env: [], compose: PROJECT, dependsOn: ['db'] }, ports: [webPort] },
   ];
 
   // Quadlets for the final city: the same settings podman run used, as unit files systemd can start at boot.
@@ -288,23 +275,19 @@ export function defaultSteps(seed = 42): Step[] {
       at(0.3, { type: 'network.connect', container: 'api-1', network: NET, ports: [] });
     }),
 
-    step('compose', 'Compose', 'An advertising stand next to the systemd Business Center holds compose.yaml (click it to read it): the whole stack (db, podcity-api, web, metrics-collector) with its network, volume, secret, ports and mounts in one file. podman compose up --build --force-recreate first rebuilds podcity-api in R&D with a multi-stage Containerfile: the crane brings a UBI builder, the build runs on it, the final stage (UBI + nginx again) takes only the result and the builder is dumped, then a fresh UBI copy is craned in for the final stage. The layers come out identical, so it is the same podcity-api image. Then every service is redeployed at once: three more trucks join the deploy truck, one per service.', (at) => {
+    step('compose', 'Compose', 'An advertising stand by the host highway, right of the Containerfile stand, holds compose.yaml (click it to read it): the whole stack (db, podcity-api, web, metrics-collector) with its network, volume, secret, ports and mounts in one file. podman compose up --build --force-recreate first rebuilds podcity-api from the same Containerfile: every step hits the build cache, so its container just goes over to R&D and back and it is the same image. Then the stack is redeployed: the deploy truck takes db, and as soon as it leaves, three more trucks drive from the car park south of the factory hall to the bays and load podcity-api, metrics-collector and web; they wait until db is up (the others depend_on it), then deliver at once.', (at) => {
       at(0, { type: 'compose.up', project: PROJECT, path: '~/podcity/compose.yaml', lines: composeFile, services: composeStack.map((c) => c.create.name) });
-      // --build: podcity-api is rebuilt first, multi-stage.
-      at(1, { type: 'image.build.start', image: CUSTOM, base: UBI, containerfile: multiStage });
-      at(1, { type: 'image.build.stage', image: CUSTOM, stage: 'builder', base: UBI });
-      at(1.5, { type: 'image.build.layer', image: CUSTOM, stage: 'builder', instruction: 'COPY . /src', layer: builderLayers[0]! });
-      at(1.5, { type: 'image.build.layer', image: CUSTOM, stage: 'builder', instruction: multiStage[3]!, layer: builderLayers[1]! });
-      at(1.5, { type: 'image.build.layer', image: CUSTOM, instruction: multiStage[6]!, layer: customLayers[0]! });
-      at(1.5, { type: 'image.build.layer', image: CUSTOM, from: 'builder', instruction: multiStage[7]!, layer: customLayers[1]! });
-      at(0.5, { type: 'image.build.discard', image: CUSTOM, stage: 'builder', layers: builderLayers });
-      at(1.5, { type: 'image.build.layer', image: CUSTOM, instruction: multiStage[8]!, layer: customLayers[2]! });
-      at(1.5, { type: 'image.build.done', image: CUSTOM, layers: [...ubiLayers, ...customLayers] });
-      // Then the whole stack at once: four trucks, one per service (the director holds them until the build is in).
+      // --build: podcity-api is rebuilt from the same Containerfile; every step hits the build cache, so it is the same image.
+      at(1, { type: 'image.build.cached', image: CUSTOM, containerfile, layers: [...ubiLayers, ...customLayers] });
+      // Then the stack (the director holds it until the build is in): every old container goes, db comes up
+      // first on the city's own truck, and only then the services that depend on it, three trucks at once.
       composeStack.forEach((c, i) => at(i === 0 ? 1.5 : 0.1, { type: 'container.remove', id: c.old, compose: PROJECT }));
-      composeStack.forEach((c, i) => at(i === 0 ? 0.5 : 0.4, c.create));
-      composeStack.forEach((c, i) => at(i === 0 ? 3.5 : 0.1, { type: 'container.start', id: c.create.id }));
-      composeStack.forEach((c) => at(0.1, { type: 'network.connect', container: c.create.id, network: NET, ports: c.ports }));
+      const [db, ...dependents] = composeStack;
+      for (const group of [[db!], dependents]) {
+        group.forEach((c, i) => at(i === 0 ? 0.5 : 0.4, c.create));
+        group.forEach((c, i) => at(i === 0 ? 3.5 : 0.1, { type: 'container.start', id: c.create.id }));
+        group.forEach((c) => at(0.1, { type: 'network.connect', container: c.create.id, network: NET, ports: c.ports }));
+      }
     }),
 
     step('quadlet', 'Quadlet', 'The Quadlet department writes web.container, api.container and db.container and sends them to systemd, where each gets a pavilion beside the tower (click one to read it). On daemon-reload the Quadlet generator turns each into a .service, which systemd can now start at boot and restart on failure.', (at) => {

@@ -19,6 +19,8 @@ import {
   LOCKER,
   spareLockerSlots,
   truckRoads,
+  parkingLot,
+  parkingStalls,
   visitorBridge,
   districts, quadletOffice, quadletRoad, SYSTEMD_TOWER, rndLab, serviceGate, serviceRoute, warehouseHall, type DistrictId, type Pad } from './layout';
 import { palette } from './palette';
@@ -80,6 +82,7 @@ export function buildCity(scene: THREE.Scene): City {
   addRoad(scene, serviceRoute);
   addRoad(scene, quadletRoad);
   for (const r of truckRoads()) addRoad(scene, r.points, palette.road, r.width, 0.34); // port footbridges cross above them
+  buildParkingLot(scene);
   // The service road enters the city through a gate in the south wall: systemd lives on the host.
   const gatePos = serviceGate();
   const gate = makeGate(4, false);
@@ -178,6 +181,29 @@ function buildTowerCrane(scene: THREE.Scene, spec: CraneSpec): void {
   crane.traverse((o) => (o.castShadow = true));
   tag(crane, { key: spec.name, kind: 'district', name: 'Crane · image delivery' });
   scene.add(crane);
+}
+
+/** Car park for compose's extra trucks: an asphalt pad with white stall lines between the stalls. */
+function buildParkingLot(scene: THREE.Scene): void {
+  const lot = new THREE.Group();
+  lot.position.set(parkingLot.x, 0, parkingLot.z);
+  const pad = new THREE.Mesh(new THREE.BoxGeometry(parkingLot.w, 0.1, parkingLot.d), mat(palette.road));
+  pad.position.y = 0.3;
+  pad.receiveShadow = true;
+  lot.add(pad);
+  const line = new THREE.BoxGeometry(9, 0.02, 0.15);
+  const zs = parkingStalls.map((s) => s.z - parkingLot.z);
+  const gap = zs.length > 1 ? zs[1]! - zs[0]! : 3.5;
+  for (const z of [...zs.map((z) => z - gap / 2), zs.at(-1)! + gap / 2]) {
+    const l = new THREE.Mesh(line, mat(0xf5f5f5));
+    l.position.set(parkingStalls[0]!.x - parkingLot.x + 0.5, 0.36, z);
+    lot.add(l);
+  }
+  const label = makeLabel('Car park · compose trucks', 'label district');
+  label.position.set(0, 3, 0);
+  lot.add(label);
+  tag(pad, { key: 'district:parking', kind: 'district', name: 'Car park · compose trucks' });
+  scene.add(lot);
 }
 
 /** Deploy truck flatbed: where a carried container sits, in the truck's local frame (cab at +x). */

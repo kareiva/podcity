@@ -153,6 +153,7 @@ function describe(e: SimEvent): string {
     case 'image.build.layer': return `  ${e.stage ? `[${e.stage}] ` : ''}${e.instruction} --> ${e.layer}`;
     case 'image.build.discard': return `  [${e.stage}] intermediate stage removed`;
     case 'image.build.done': return `  COMMIT ${e.image}`;
+    case 'image.build.cached': return `podman build -t ${e.image} -f Containerfile .  # ${e.containerfile.filter((l) => /^[A-Z]+\s/.test(l)).length} steps, all Using cache: image unchanged`;
     case 'compose.up': return `podman compose -f ${e.path} up -d --build --force-recreate  # ${e.services.join(', ')}`;
     case 'container.create':
       if (e.compose) return `  [${e.compose}] recreate ${e.name}`;

@@ -103,6 +103,7 @@ export function applyEvent(state: PodmanState, e: SimEvent): void {
       break;
     case 'image.build.start':
     case 'image.build.stage':
+    case 'image.build.cached': // same layers, same image
       break;
     case 'image.build.discard':
       for (const l of e.layers) state.layers.delete(l);

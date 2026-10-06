@@ -182,13 +182,6 @@ export function quadletOffice(): { building: { x: number; z: number }; board: { 
   return { building: { x: q.x - 3, z: q.z - 1 }, board: { x: q.x + 5, z: q.z + 2 } };
 }
 
-/**
- * Compose blueprint stand: on the host highway's north roadside next to the systemd Business Center (west of it;
- * the quadlet pavilions take the east side), its board facing the highway (south). `yaw` turns the stand, whose
- * board is drawn facing west, round to face south.
- */
-export const composeStand = { x: districts.businessCenter.x - districts.businessCenter.w / 2 - 7.5, z: districts.businessCenter.z + 1, yaw: Math.PI / 2 };
-
 /** Pavilion for the n-th deployed quadlet: a row on the host highway's north roadside, east of the systemd tower. */
 export function quadletPavilionSlot(n: number): { x: number; z: number } {
   const b = districts.businessCenter;
@@ -305,6 +298,15 @@ export const extraTruckBays = [
   { x: -31, z: -3 },
 ];
 
+/**
+ * Car park for the three extra trucks compose brings in: south of the Factory District hall, between the visitor
+ * bridge and the Locker Yard. Its exit lane runs west under the bridge to the truck corridor.
+ */
+export const parkingLot = { x: 2, z: 33, w: 14, d: 12 };
+
+/** Stalls in the car park, one per extra truck (and its loading bay): side by side, parked facing west to the exit. */
+export const parkingStalls = [-3.5, 0, 3.5].map((dz) => ({ x: parkingLot.x + 0.5, z: parkingLot.z + dz }));
+
 /** Lane south of a plot row (clear of the buildings and the next row) the truck drives along to a plot. */
 export function deployLaneZ(factory: { z: number }): number {
   return factory.z + FACTORY.l / 2 + 2; // middle of the 4 m gap between plot rows
@@ -356,11 +358,30 @@ export function bayToStopRoute(stop: { x: number; z: number }, bay: { x: number;
   ]);
 }
 
+/** Lane down the east edge of the truck bays, next to the corridor: how the car park's trucks reach their bays. */
+const BAY_LINK_X = TRUCK_CORRIDOR_X - 1.5;
+
+/**
+ * Car park stall -> loading bay: out of the car park, west along its exit lane under the visitor bridge to the
+ * corridor, north up the corridor's west edge past the main truck, and west into the bay (arriving facing west).
+ */
+export function lotToBayRoute(stall: { x: number; z: number }, bay: { x: number; z: number }): [number, number][] {
+  const exit = parkingLot.x - parkingLot.w / 2;
+  return roundedPath([
+    [stall.x, stall.z],
+    [exit, parkingLot.z],
+    [BAY_LINK_X, parkingLot.z],
+    [BAY_LINK_X, bay.z],
+    [bay.x, bay.z],
+  ]);
+}
+
 /**
  * Roads under the deploy truck's routes (the routes above, straightened): the pickup lane in front of the
  * Environmental Shopping Center, the corridor north between the warehouse and the factories, the strip
- * behind the factory hall to the Secret Facility, the apron of the truck bays with its spur to the corridor,
- * and the lane in front of the first row of plots. Published-port footbridges cross over them.
+ * behind the factory hall to the Secret Facility, the apron of the truck bays with its spur and link to the
+ * corridor, the lane in front of the first row of plots, and the car park's exit lane to the corridor.
+ * Published-port footbridges cross over them.
  */
 export function truckRoads(): { points: [number, number][]; width: number }[] {
   const shop = shopStop();
@@ -374,6 +395,8 @@ export function truckRoads(): { points: [number, number][]; width: number }[] {
     { points: [[truckBay.x, Math.min(...bayZ) - 1.5], [truckBay.x, Math.max(...bayZ) + 1.5]], width: 8 }, // bay apron, trucks park across it
     { points: [[truckBay.x + 4, truckBay.z], [TRUCK_CORRIDOR_X, truckBay.z]], width: 4 },
     { points: [[TRUCK_CORRIDOR_X, lane], [lastPlot.x, lane]], width: 3 }, // fits the gap in front of the plot row
+    { points: [[parkingLot.x - parkingLot.w / 2, parkingLot.z], [TRUCK_CORRIDOR_X, parkingLot.z]], width: 4 }, // car park exit
+    { points: [[BAY_LINK_X, Math.min(...bayZ) - 1.5], [BAY_LINK_X, Math.max(...bayZ) + 1.5]], width: 3 }, // bays <-> corridor link
   ];
 }
 
@@ -475,8 +498,9 @@ export function doorQueueSlot(factory: { x: number; z: number }, n: number): { x
 
 export const HIGHWAY_LANES = 3;
 
-/** Gap between plot columns (east of systemd) the Containerfile stand takes, right of the first host offices. */
+/** Gaps between plot columns (east of systemd) the advertising stands take, right of the first host offices. */
 const CONTAINERFILE_GAP = 2;
+const COMPOSE_GAP = 3; // right of the Containerfile stand
 
 /** x of the n-th gap between two factory plot columns, the first between columns 0 and 1. */
 function columnGapX(n: number): number {
@@ -488,11 +512,11 @@ function columnGapX(n: number): number {
  * Plot for the n-th host path: an office on the near (north) roadside of the host highway, between the wall
  * and the road. East of the systemd Business Center and its quadlet pavilions, each in the gap between two
  * factory plot columns, so published-port bridges (which run due south from a plot column) pass between them.
- * The gap the Containerfile stand stands in is skipped.
+ * The gaps the Containerfile and compose stands stand in are skipped.
  */
 export function hostPathSlot(n: number): { x: number; z: number } {
   const h = districts.hostLand;
-  return { x: columnGapX(n < CONTAINERFILE_GAP ? n : n + 1), z: h.z - h.d / 2 - 4 };
+  return { x: columnGapX(n < CONTAINERFILE_GAP ? n : n + 2), z: h.z - h.d / 2 - 4 };
 }
 
 /**
@@ -501,3 +525,10 @@ export function hostPathSlot(n: number): { x: number; z: number } {
  * Wired to R&D by an arc. Billboards are built facing west; `yaw` turns them.
  */
 export const containerfileStand = { x: columnGapX(CONTAINERFILE_GAP), z: districts.hostLand.z - districts.hostLand.d / 2 - 6, yaw: Math.PI / 2 };
+
+/**
+ * Compose advertising stand: on the host highway's north roadside, right (east) of the Containerfile stand in the
+ * next gap between plot columns, its board facing the highway (south). `yaw` turns the stand, whose board is drawn
+ * facing west, round to face south.
+ */
+export const composeStand = { x: columnGapX(COMPOSE_GAP), z: containerfileStand.z, yaw: Math.PI / 2 };

@@ -37,6 +37,7 @@ export type SimEvent =
   // The intermediate stage is thrown away once the final stage has taken what it needs.
   | { type: 'image.build.discard'; image: string; stage: string; layers: Digest[] }
   | { type: 'image.build.done'; image: string; layers: Digest[] }
+  | { type: 'image.build.cached'; image: string; containerfile: string[]; layers: Digest[] } // every step from cache: image unchanged
   // autoRemove: `podman run --rm`, a one-off container removed as soon as it exits. command overrides the image's CMD.
   // restart: `--restart=always`, podman starts it again whenever it exits.
   // runFor (simulation only): seconds the workload runs before exiting by itself; drives the restart loop.
@@ -53,6 +54,7 @@ export type SimEvent =
       restart?: 'always';
       runFor?: number;
       compose?: string; // compose project that (re)created it
+      dependsOn?: string[]; // compose depends_on: names of services that must be up before this one is deployed
       // Create-time flags `--network` and `-p`; the connection itself is announced by network.connect when it starts.
       network?: string;
       ports?: Port[];

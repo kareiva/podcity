@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { FOOTBRIDGE, portBridge, visitorBridge, wallZ, containerfileStand, truckRoads, composeStand, spareLockerSlots, LOCKER, lockerSlot, quadletPavilionSlot, CITY_RADIUS, serviceGate, roundedPath, bayToStopRoute, secretStop, shopStop, stopToPlotRoute, stopToStopRoute, deployLaneZ, deployRoute, truckBay, FACTORY, ISO_20FT, buildCranes, buildWaypoints, pullCranes, pullWaypoints, unpackSpot, smoothPath, seaportLayout, hostPathSlot, quadletRoad, serviceRoute, labBenchSlot, SHELF_CAPACITY, districts, factorySlot, feederRoute, manifestSlot, networkBelt, shelfSlot, warehouseHall, type Pad } from './layout';
+import { parkingLot, parkingStalls, lotToBayRoute, extraTruckBays, FOOTBRIDGE, portBridge, visitorBridge, wallZ, containerfileStand, truckRoads, composeStand, spareLockerSlots, LOCKER, lockerSlot, quadletPavilionSlot, CITY_RADIUS, serviceGate, roundedPath, bayToStopRoute, secretStop, shopStop, stopToPlotRoute, stopToStopRoute, deployLaneZ, deployRoute, truckBay, FACTORY, ISO_20FT, buildCranes, buildWaypoints, pullCranes, pullWaypoints, unpackSpot, smoothPath, seaportLayout, hostPathSlot, quadletRoad, serviceRoute, labBenchSlot, SHELF_CAPACITY, districts, factorySlot, feederRoute, manifestSlot, networkBelt, shelfSlot, warehouseHall, type Pad } from './layout';
 
 const OUTSIDE = new Set(['seaport', 'hostLand', 'freight', 'businessCenter']);
 
@@ -110,6 +110,7 @@ describe('city layout', () => {
       stopToStopRoute(shopStop(), secretStop()),
       ...Array.from({ length: 5 }, (_, n) => stopToPlotRoute(secretStop(), factorySlot(n))),
       ...Array.from({ length: 5 }, (_, n) => deployRoute(factorySlot(n))),
+      ...parkingStalls.map((stall, i) => lotToBayRoute(stall, extraTruckBays[i]!).filter(([x]) => x < parkingLot.x - parkingLot.w / 2)), // out of the car park
     ];
     for (const route of routes) for (const p of route) expect(onRoad(p), `${p}`).toBe(true);
     const blocked: Pad[] = [warehouseHall(), districts.secrets, districts.shoppingCenter, ...Array.from({ length: 5 }, (_, n) => ({ ...factorySlot(n), w: FACTORY.w, d: FACTORY.l }))];
@@ -118,17 +119,18 @@ describe('city layout', () => {
         for (const b of blocked) expect(Math.abs(x - b.x) < b.w / 2 + width / 2 - 1 && Math.abs(z - b.z) < b.d / 2 + width / 2 - 1, `${x},${z}`).toBe(false);
   });
 
-  it('stands the compose billboard beside the systemd Business Center, facing the highway, clear of everything there', () => {
-    const b = districts.businessCenter;
+  it('stands the compose billboard right of the Containerfile billboard, facing the highway, clear of everything there', () => {
     const h = districts.hostLand;
     const stand = { x: composeStand.x, z: composeStand.z, w: 8.8, d: 2.4 }; // turned: billboard runs east-west
-    expect(overlaps(stand, b)).toBe(false);
-    expect(Math.abs(stand.x - b.x)).toBeLessThan(b.w / 2 + 10); // next to it
+    expect(stand.x).toBeGreaterThan(containerfileStand.x); // to its right
+    expect(stand.x - containerfileStand.x).toBeLessThan(15); // next to it
     expect(stand.z + stand.d / 2).toBeLessThan(h.z - h.d / 2); // on the roadside, not on the highway
     expect(Math.abs(stand.x - h.x) + stand.w / 2).toBeLessThan(h.w / 2);
-    expect(Math.hypot(stand.x + stand.w / 2, stand.z - stand.d / 2)).toBeGreaterThan(CITY_RADIUS); // outside the wall
-    for (let p = 0; p < 3; p++) expect(overlaps(stand, { ...quadletPavilionSlot(p), w: 4.4, d: 4.4 })).toBe(false);
-    for (let n = 0; n < 5; n++) expect(overlaps(stand, { ...hostPathSlot(n), w: 5, d: 5 })).toBe(false);
+    for (const [cx, cz] of [[stand.x - stand.w / 2, stand.z - stand.d / 2], [stand.x + stand.w / 2, stand.z - stand.d / 2]] as const)
+      expect(Math.hypot(cx, cz)).toBeGreaterThan(CITY_RADIUS); // outside the wall
+    expect(overlaps(stand, { x: containerfileStand.x, z: containerfileStand.z, w: 8.8, d: 2.4 })).toBe(false);
+    for (let n = 0; n < 5; n++) expect(overlaps(stand, { ...hostPathSlot(n), w: 5, d: 5 }), `office ${n}`).toBe(false);
+    for (let c = 0; c < 5; c++) expect(Math.abs(factorySlot(c).x - stand.x), `port bridge ${c}`).toBeGreaterThan(stand.w / 2 + 2.5 / 2);
   });
 
   it('fills the locker yard with spare lockers that fit inside it, the volume row among them', () => {
@@ -201,6 +203,25 @@ describe('city layout', () => {
     expect(visitorBridge.stub).toBe(visitorBridge.piers[0]); // ends at its last column...
     expect(visitorBridge.stub).toBeGreaterThan(districts.factories.z + districts.factories.d / 2); // ...outside the hall
     expect(visitorBridge.from).toBeLessThan(web.z + FACTORY.l / 2); // a published port links it to a kiosk on the roof
+  });
+
+  it('puts the car park between the visitor bridge and the Locker Yard, clear of everything, a stall per extra truck', () => {
+    const lot = parkingLot;
+    const yard = districts.lockers;
+    expect(lot.x - lot.w / 2).toBeGreaterThan(visitorBridge.x + FOOTBRIDGE.width / 2 + 1); // east of the bridge
+    expect(lot.x + lot.w / 2).toBeLessThan(yard.x - yard.w / 2); // west of the Locker Yard
+    for (const [id, d] of Object.entries(districts)) expect(overlaps(lot, d), id).toBe(false);
+    expect(overlaps(lot, warehouseHall())).toBe(false);
+    const corners = [[lot.x - lot.w / 2, lot.z - lot.d / 2], [lot.x + lot.w / 2, lot.z + lot.d / 2], [lot.x - lot.w / 2, lot.z + lot.d / 2], [lot.x + lot.w / 2, lot.z - lot.d / 2]];
+    for (const [x, z] of corners) expect(Math.hypot(x!, z!)).toBeLessThan(CITY_RADIUS); // inside the wall
+    expect(parkingStalls).toHaveLength(extraTruckBays.length);
+    const truck = { l: 8.4, w: 2.7 };
+    for (const s of parkingStalls) {
+      expect(Math.abs(s.x - lot.x) + truck.l / 2).toBeLessThan(lot.w / 2);
+      expect(Math.abs(s.z - lot.z) + truck.w / 2).toBeLessThan(lot.d / 2);
+    }
+    // The exit lane passes under the visitor bridge between two of its piers.
+    for (const z of visitorBridge.piers) expect(Math.abs(z - lot.z)).toBeGreaterThan(2 + 0.5);
   });
 
   it('puts the seaport terminal on the quay, clear of the container pick-up, and the ship on open water', () => {

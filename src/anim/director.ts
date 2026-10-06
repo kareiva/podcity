@@ -24,6 +24,8 @@ import {
   stopToStopRoute,
   truckBay,
   extraTruckBays,
+  lotToBayRoute,
+  parkingStalls,
   pullCranes,
   pullWaypoints,
   type CraneSpec,
@@ -92,6 +94,7 @@ interface Factory {
   running: boolean;
   networks: Set<string>; // networks it is hooked onto with a feeder
   bridges: Footbridge[]; // visitor bridges of its published ports
+  compose?: string; // compose project that created it
 }
 
 /** A published port's visitor bridge: visitors walk its walkway (local points) while the factory runs. */
@@ -122,7 +125,8 @@ function stageKey(image: string, stage: string): string {
 /** A deploy truck and the bay it parks at. */
 interface Truck {
   truck: THREE.Object3D;
-  bay: { x: number; z: number };
+  bay: { x: number; z: number }; // where it loads
+  stall?: { x: number; z: number }; // car park stall it starts from and returns to (compose's extra trucks)
   busy: boolean;
 }
 
@@ -173,6 +177,8 @@ export class Director {
   private composeStands = new Map<string, THREE.Group>(); // compose project -> blueprint stand
   private fleet: Truck[] = []; // deploy trucks: the city's own, plus the extra ones compose brings in
   private truckWaiters: (() => void)[] = []; // deliveries waiting for a free truck
+  private fleetWaiters: (() => void)[] = []; // deployments waiting for a service they depend on to leave or be up
+  private departed = new Set<string>(); // `project:name` of containers whose truck has left with them
   private secrets = new Map<string, THREE.Mesh>(); // podman secret -> plaque at the Secret Facility
   private units = new Map<string, THREE.Mesh>(); // generated systemd unit -> plate on the tower
   private trafficPaths = new Map<string, ReturnType<typeof pathSampler>>(); // `net|a|b` -> feeder-belt-feeder path
@@ -195,6 +201,7 @@ export class Director {
     // Registered synchronously, so anything that needs the image (a factory copying it) waits for it to be stored.
     bus.on('image.pull.start', (e) => this.expectImage(e.image));
     bus.on('image.build.start', (e) => this.expectImage(e.image));
+    bus.on('image.build.cached', (e) => this.expectImage(e.image));
     bus.on('image.pull.start', (e) => this.enqueue(`image:${e.image}`, () => this.pullArrives(e)));
     bus.on('image.layer.done', (e) => this.enqueue(`image:${e.image}`, () => this.shelveLayer(e)));
     bus.on('image.pull.done', (e) => this.enqueue(`image:${e.image}`, () => this.pullDone(e)));
@@ -203,6 +210,7 @@ export class Director {
     bus.on('image.build.layer', (e) => this.enqueue(`image:${e.image}`, () => this.commitLayer(e)));
     bus.on('image.build.discard', (e) => this.enqueue(`image:${e.image}`, () => this.discardStage(e)));
     bus.on('image.build.done', (e) => this.enqueue(`image:${e.image}`, () => this.deliverBuild(e)));
+    bus.on('image.build.cached', (e) => this.enqueue(`image:${e.image}`, () => this.cachedBuild(e)));
     bus.on('quadlet.create', (e) => this.enqueue(`quadlet:${e.file}`, () => this.writeQuadlet(e)));
     bus.on('systemd.daemon-reload', (e) => {
       for (const g of e.generated) this.enqueue(`quadlet:${g.quadlet}`, () => this.generateUnit(g.quadlet, g.unit));
@@ -261,6 +269,8 @@ export class Director {
     this.crateCount = 0;
     this.fleet = [];
     this.truckWaiters = [];
+    this.fleetWaiters = [];
+    this.departed.clear();
     this.restCranes();
   }
 
@@ -614,6 +624,31 @@ export class Director {
     this.imageStored.set(ref, entry);
   }
 
+  /** Resolves once `ready()` holds, checked whenever a truck leaves or a container comes up. */
+  private async fleetUntil(ready: () => boolean): Promise<void> {
+    const gen = this.gen;
+    while (!ready()) {
+      await new Promise<void>((r) => this.fleetWaiters.push(r));
+      if (gen !== this.gen) return new Promise(() => {}); // reset meanwhile: this choreography is dead
+    }
+  }
+
+  /** Resolves once a container called `name` (of the same compose project) is running. */
+  private whenUp(name: string, project: string | undefined): Promise<void> {
+    return this.fleetUntil(() => [...this.factories.values()].some((f) => f.name === name && f.compose === project && f.running));
+  }
+
+  /** Resolves once the truck taking a container called `name` (of the same compose project) has left. */
+  private whenDeparted(name: string, project: string | undefined): Promise<void> {
+    return this.fleetUntil(() => this.departed.has(`${project ?? ''}:${name}`));
+  }
+
+  /** The truck carrying the factory's container has left: services that depend on it may load now. */
+  private markDeparted(f: Factory): void {
+    this.departed.add(`${f.compose ?? ''}:${f.name}`);
+    this.fleetWaiters.splice(0).forEach((r) => r());
+  }
+
   /** Resolves once no pull or build is in flight. */
   private async buildsDone(): Promise<void> {
     await Promise.all([...this.imageStored.values()].map((s) => s.done));
@@ -906,6 +941,40 @@ export class Director {
     }
     releaseSpot();
     return { cargo: copy, releaseYard };
+  }
+
+  /**
+   * `podman build` with every step from the build cache: the image does not change. Its container leaves the
+   * warehouse row for R&D (the build checks each step against it) while the Containerfile stand flashes; there its
+   * layers and container flash ("Using cache") and the crane takes it back to its place in the row.
+   */
+  private async cachedBuild(e: EventOf<'image.build.cached'>): Promise<void> {
+    const image = this.manifests.get(e.image);
+    const settle = () => this.imageStored.get(e.image)?.resolve();
+    if (!image) return settle();
+    const stand = this.containerfiles.get(e.image);
+    if (stand) void this.flashBlueprint(stand);
+    const home = image.position.clone();
+    const yaw = image.rotation.y;
+    const yard = buildWaypoints[0]!;
+    const spot = buildWaypoints.at(-1)!;
+    const releaseYard = await this.acquire(spotKey(yard));
+    const releaseSpot = await this.acquire(spotKey(spot));
+    await this.placeOn(image, new THREE.Vector3(spot[0], 0.3 + CARGO.h / 2, spot[1]), 0, 1);
+    // The build relay run backwards: unpacking spot -> R&D yard.
+    for (const spec of [...buildCranes].reverse()) {
+      const releaseCrane = await this.acquire(spec.name);
+      await this.craneLift({ ...spec, from: spec.to, to: spec.from }, image);
+      releaseCrane();
+    }
+    releaseSpot();
+    const shell = image.getObjectByName('shell');
+    const layers = e.layers.flatMap((l) => this.crates.get(l) ?? []);
+    await Promise.all([...layers.map((c) => this.flash(c)), ...(shell instanceof THREE.Mesh ? [this.flash(shell)] : [])]);
+    const releaseUnpack = await this.relay(image, buildWaypoints, buildCranes, releaseYard);
+    await this.placeOn(image, home, yaw, 1);
+    releaseUnpack();
+    settle();
   }
 
   /** The intermediate stage is not kept: its container tips into the skip behind the yard and is gone. */
@@ -1350,6 +1419,8 @@ export class Director {
     if (plot === undefined) this.plots.set(e.name, (plot = this.plots.size));
     const slot = factorySlot(plot);
     if (e.compose) await this.buildsDone(); // compose up --build: nothing is recreated until every image is built
+    // depends_on: load once the dependency's truck has left, but deliver only once it runs.
+    for (const name of e.dependsOn ?? []) await this.whenDeparted(name, e.compose);
     await this.whenImage(e.image); // the image's container must be in the warehouse to be copied
     const group = new THREE.Group();
     group.position.set(slot.x, 0.3, slot.z);
@@ -1387,6 +1458,7 @@ export class Director {
       cards: [],
       extras: [],
       bridges: [],
+      compose: e.compose,
       oneOff: !!e.autoRemove,
       restartAlways: e.restart === 'always',
       restarts: 0,
@@ -1411,7 +1483,11 @@ export class Director {
       const pickups: Pickup[] = [];
       if (plain.length) pickups.push({ stop: shopStop(), take: () => this.makeCards(e, factory, plain) });
       if (sealed.length) pickups.push({ stop: secretStop(), take: () => this.makeCards(e, factory, sealed) });
-      await this.truckToPlot(copy, factory, pickups);
+      // compose's dependents go on the extra trucks from the car park; everything else on the city's own.
+      const dependsOn = e.dependsOn ?? [];
+      await this.truckToPlot(copy, factory, pickups, dependsOn.length ? 'lot' : 'bay', async () => {
+        for (const name of dependsOn) await this.whenUp(name, e.compose);
+      });
       group.attach(copy);
     }
     await this.rise(body, FACTORY_SIZE, 0);
@@ -1439,11 +1515,12 @@ export class Director {
     return this.fleet[0];
   }
 
-  /** compose up: three more trucks roll into the bays beside the main one, so the whole stack ships at once. */
+  /** compose up: three more trucks appear in the car park, each with a loading bay beside the main one. */
   private addComposeTrucks(): void {
     const main = this.mainTruck();
     if (!main || this.fleet.length > 1) return;
     extraTruckBays.forEach((bay, i) => {
+      const stall = parkingStalls[i]!;
       const truck = main.truck.clone(false);
       truck.name = `truck:compose:${i}`;
       for (const part of main.truck.children) {
@@ -1455,21 +1532,21 @@ export class Director {
         }
         truck.add(p);
       }
-      truck.position.set(bay.x, 0.3, bay.z);
-      truck.rotation.set(0, 0, 0);
+      truck.position.set(stall.x, 0.3, stall.z);
+      truck.rotation.set(0, Math.PI, 0); // parked facing west, toward the car park exit
       tag(truck, { key: truck.name, kind: 'district', name: 'Deploy truck · brought in by compose' });
       this.root.add(truck);
-      const t: Truck = { truck, bay, busy: true };
+      const t: Truck = { truck, bay, stall, busy: true };
       this.fleet.push(t);
       void this.popIn(truck).then(() => this.freeTruck(t));
     });
   }
 
-  /** First free truck; waits for one to come back if all are out. */
-  private async takeTruck(): Promise<Truck> {
+  /** First free truck, preferring the bay's or the car park's; waits for one to come back if all are out. */
+  private async takeTruck(prefer: 'bay' | 'lot' = 'bay'): Promise<Truck> {
     const gen = this.gen;
     for (;;) {
-      const free = this.fleet.find((t) => !t.busy);
+      const free = this.fleet.find((t) => !t.busy && !!t.stall === (prefer === 'lot')) ?? this.fleet.find((t) => !t.busy);
       if (free) {
         free.busy = true;
         return free;
@@ -1487,20 +1564,33 @@ export class Director {
   /**
    * A free deploy truck loads `copy` at its bay, drives to the plot, unloads
    * it onto the plot and heads back. Usually there is one truck and
-   * deliveries queue for it; compose brings in more.
+   * deliveries queue for it; compose brings in more, which drive from the car park to their bays first and
+   * park there again afterwards.
    */
-  private async truckToPlot(copy: THREE.Group, factory: Factory, pickups: Pickup[] = []): Promise<void> {
+  private async truckToPlot(copy: THREE.Group, factory: Factory, pickups: Pickup[] = [], prefer: 'bay' | 'lot' = 'bay', ready?: () => Promise<void>): Promise<void> {
     const slot = factory.slot;
     const onPlot = new THREE.Vector3(slot.x, 0.3 + CARGO.h / 2, slot.z);
     if (!this.mainTruck()) {
+      await ready?.();
+      this.markDeparted(factory);
       copy.position.copy(onPlot); // no city (tests): just place it
       copy.rotation.set(0, Math.PI / 2, 0);
       return;
     }
-    const taken = await this.takeTruck();
-    const { truck, bay } = taken;
+    const taken = await this.takeTruck(prefer);
+    const { truck, bay, stall } = taken;
     const release = () => this.freeTruck(taken);
     const route = deployRoute(slot, bay);
+    const fromLot = stall ? lotToBayRoute(stall, bay) : undefined;
+    if (fromLot) {
+      // Out of the car park one at a time (they share its exit lane), to the loading bay, turned to face east.
+      const exit = await this.acquire('lot:exit');
+      const drive = this.ride(truck, fromLot, truckTime(fromLot));
+      await this.tw.tween({ duration: 1.2, update: () => {} });
+      exit();
+      await drive;
+      await this.turnTo(truck, 0, 0.6);
+    }
     const bed = new THREE.Vector3(TRUCK_BED.x, TRUCK_BED.top + CARGO.h / 2, 0);
 
     // Load: the copy hops out of the warehouse row onto the flatbed.
@@ -1508,6 +1598,8 @@ export class Director {
     truck.attach(copy);
     copy.position.copy(bed);
     copy.rotation.set(0, 0, 0);
+    await ready?.(); // loaded: wait at the bay until it may deliver (compose depends_on)
+    this.markDeparted(factory);
 
     // Pickup tour: each stop's cards/documents hop onto the container roof.
     const cards: THREE.Mesh[] = [];
@@ -1555,7 +1647,15 @@ export class Director {
       const back = [...route].reverse();
       await this.turnTo(truck, pathSampler(back).at(0).yaw, 0.5);
       await this.ride(truck, back, truckTime(back));
-      await this.turnTo(truck, 0, 0.5); // parked facing east, ready for the next load
+      if (fromLot) {
+        // Back past the bay to its car park stall.
+        const home = [...fromLot].reverse();
+        await this.turnTo(truck, pathSampler(home).at(0).yaw, 0.5);
+        await this.ride(truck, home, truckTime(home));
+        await this.turnTo(truck, Math.PI, 0.5); // parked facing west again
+      } else {
+        await this.turnTo(truck, 0, 0.5); // parked facing east, ready for the next load
+      }
       release();
     })();
   }
@@ -1682,6 +1782,7 @@ export class Director {
       ...this.feeders(f).map((m) => this.recolor(m, palette.network)),
     ]);
     f.running = true;
+    this.fleetWaiters.splice(0).forEach((r) => r()); // services that depend on this one may go now
   }
 
   /** Stopped or exited: the building stays, dark and boarded up, no green stack. */
