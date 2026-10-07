@@ -1,5 +1,7 @@
 import { defineConfig } from 'vitest/config';
 
+import { cloudflare } from "@cloudflare/vite-plugin";
+
 export default defineConfig({
   build: {
     target: 'es2022',
@@ -10,4 +12,5 @@ export default defineConfig({
     environment: 'node',
     include: ['src/**/*.test.ts'],
   },
+  plugins: [cloudflare()],
 });
